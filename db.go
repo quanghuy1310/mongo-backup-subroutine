@@ -27,7 +27,7 @@ func ConnectMongo(uri string) error {
 	}
 
 	mongoClient = client
-	fmt.Println("[INFO] Đã kết nối thành công tới MongoDB!")
+	fmt.Println("[INFO] Successfully connected to MongoDB!")
 	return nil
 }
 
