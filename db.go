@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -20,7 +21,13 @@ func ConnectMongo(uri string) error {
 		return err
 	}
 
+	// Ping để xác nhận kết nối thành công
+	if err := client.Ping(ctx, nil); err != nil {
+		return err
+	}
+
 	mongoClient = client
+	fmt.Println("[INFO] Đã kết nối thành công tới MongoDB!")
 	return nil
 }
 

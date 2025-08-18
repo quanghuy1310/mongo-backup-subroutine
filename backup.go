@@ -9,12 +9,15 @@ import (
 func BackupDatabase(dbName string, date time.Time) error {
 	dir := BackupDir(dbName, date)
 
+	fmt.Printf("[DEBUG] Starting backup for DB: %s, date: %s\n", dbName, FormatDate(date))
+
 	done, err := IsBackupDone(dbName, FormatDate(date))
 	if err != nil {
+		fmt.Printf("[ERROR] Failed to check backup status: %v\n", err)
 		return err
 	}
 	if done {
-		fmt.Println("Backup already exists:", dbName, date)
+		fmt.Printf("[INFO] Backup already exists: %s, date: %s\n", dbName, FormatDate(date))
 		return nil
 	}
 
@@ -26,15 +29,16 @@ func BackupDatabase(dbName string, date time.Time) error {
 		"--out", dir,
 	)
 
-	fmt.Println("Running mongodump:", cmd.String())
+	fmt.Println("[INFO] Running mongodump:", cmd.String())
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		fmt.Printf("[ERROR] mongodump failed: %v\nOutput: %s\n", err, string(output))
 		SaveBackupStatus(dbName, FormatDate(date), "failed", string(output))
 		return err
 	}
 
 	SaveBackupStatus(dbName, FormatDate(date), "success", "OK")
-	fmt.Println("Backup successful:", dbName, collection)
+	fmt.Printf("[INFO] Backup successful: %s, collection: %s\n", dbName, collection)
 	return nil
 }
 
