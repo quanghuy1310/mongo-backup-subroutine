@@ -1,0 +1,17 @@
+# Ignore environment files
+.env
+
+# Ignore build output
+*.exe
+*.out
+
+# Ignore IDE/editor folders
+.vscode/
+.idea/
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore Go build cache
+bin/
