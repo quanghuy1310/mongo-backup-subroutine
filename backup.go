@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
+
+	"github.com/klauspost/compress/s2"
 )
 
 func BackupDatabase(dbName string, date time.Time) error {
 	dir := BackupDir(dbName, date)
-
 	fmt.Printf("[DEBUG] Starting backup for DB: %s, date: %s\n", dbName, FormatDate(date))
 
 	done, err := IsBackupDone(dbName, FormatDate(date))
@@ -22,7 +27,7 @@ func BackupDatabase(dbName string, date time.Time) error {
 	}
 
 	collection := fmt.Sprintf("GPS_%s", FormatDate(date))
-	cmd := exec.Command("mongodump",
+	cmd := exec.Command(AppConfig.MongodumpPath,
 		"--uri", AppConfig.MongoURI,
 		"--db", dbName,
 		"--collection", collection,
@@ -37,19 +42,74 @@ func BackupDatabase(dbName string, date time.Time) error {
 		return err
 	}
 
+	// Nén file BSON bằng s2
+	bsonFile := filepath.Join(dir, dbName, collection+".bson")
+	s2File := bsonFile + ".s2"
+	compressErr := CompressFileS2(bsonFile, s2File)
+	var fileSize int64
+	if compressErr == nil {
+		info, err := os.Stat(s2File)
+		if err == nil {
+			fileSize = info.Size()
+		}
+	}
+
+	// Lưu metadata vào MongoDB
+	metaErr := SaveBackupHistory(dbName, collection, s2File, fileSize, "success", "s2", "OK")
+	if metaErr != nil {
+		fmt.Printf("[ERROR] Failed to save backup metadata: %v\n", metaErr)
+	}
+
 	SaveBackupStatus(dbName, FormatDate(date), "success", "OK")
 	fmt.Printf("[INFO] Backup successful: %s, collection: %s\n", dbName, collection)
 	return nil
 }
 
-func BackupWithRetry(dbName string, date time.Time) {
+// Compress BSON file to s2 format
+func CompressFileS2(srcPath, dstPath string) error {
+	in, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dstPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	writer := s2.NewWriter(out)
+	_, err = io.Copy(writer, in)
+	writer.Close()
+	return err
+}
+
+// Save backup metadata to MongoDB
+func SaveBackupHistory(dbName, collection, filePath string, fileSize int64, status, compression, msg string) error {
+	coll := mongoClient.Database("admin").Collection("backupHistory")
+	_, err := coll.InsertOne(context.Background(), map[string]interface{}{
+		"database":    dbName,
+		"collection":  collection,
+		"filePath":    filePath,
+		"fileSize":    fileSize,
+		"status":      status,
+		"compression": compression,
+		"message":     msg,
+		"timestamp":   time.Now(),
+	})
+	return err
+}
+
+func BackupWithRetry(dbName string, date time.Time) error {
+	var lastErr error
 	for i := 0; i < AppConfig.MaxRetries; i++ {
 		err := BackupDatabase(dbName, date)
 		if err == nil {
-			return
+			return nil
 		}
+		lastErr = err
 		fmt.Println("Backup failed, retrying after:", AppConfig.RetryInterval)
 		time.Sleep(AppConfig.RetryInterval)
 	}
 	fmt.Println("Backup failed after max retries:", dbName, date)
+	return lastErr
 }
