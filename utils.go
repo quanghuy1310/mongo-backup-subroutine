@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"time"
 
+	"path/filepath"
+
 	"github.com/klauspost/compress/s2"
 )
 
@@ -45,25 +47,30 @@ func DecompressFileS2(srcPath, dstPath string) error {
 
 // Bulk restore from a list of s2 backup files
 func BulkRestore(restoreList []string, dbName, collection string) {
-	for _, s2File := range restoreList {
-		bsonFile := s2File[:len(s2File)-3] // remove .s2 extension
-		err := DecompressFileS2(s2File, bsonFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to decompress %s: %v\n", s2File, err)
+	for _, s2BsonFile := range restoreList {
+		bsonFile := s2BsonFile[:len(s2BsonFile)-3]                // remove .s2 extension
+		metaFile := bsonFile[:len(bsonFile)-5] + ".metadata.json" // replace .bson with .metadata.json
+		s2MetaFile := metaFile + ".s2"
+		// Giải nén cả hai file
+		errBson := DecompressFileS2(s2BsonFile, bsonFile)
+		errMeta := DecompressFileS2(s2MetaFile, metaFile)
+		if errBson != nil || errMeta != nil {
+			fmt.Fprintf(os.Stderr, "Failed to decompress %s or %s: %v %v\n", s2BsonFile, s2MetaFile, errBson, errMeta)
 			continue
 		}
-		// Run mongorestore
-		cmd := exec.Command(AppConfig.MongodumpPath[:len(AppConfig.MongodumpPath)-4]+"restore", // replace mongodump with mongorestore
+		// Run mongorestore trỏ vào folder chứa cả hai file
+		folder := filepath.Dir(bsonFile)
+		cmd := exec.Command(AppConfig.MongodumpPath[:len(AppConfig.MongodumpPath)-4]+"restore",
 			"--uri", AppConfig.MongoURI,
 			"--db", dbName,
 			"--collection", collection,
-			bsonFile,
+			folder,
 		)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "mongorestore failed for %s: %v\nOutput: %s\n", bsonFile, err, string(output))
+			fmt.Fprintf(os.Stderr, "mongorestore failed for %s: %v\nOutput: %s\n", folder, err, string(output))
 		} else {
-			fmt.Printf("[INFO] Restore successful for %s\n", bsonFile)
+			fmt.Printf("[INFO] Restore successful for %s\n", folder)
 		}
 	}
 }

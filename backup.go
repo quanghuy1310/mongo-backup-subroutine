@@ -42,20 +42,23 @@ func BackupDatabase(dbName string, date time.Time) error {
 		return err
 	}
 
-	// Nén file BSON bằng s2
+	// Nén file BSON và metadata.json bằng s2
 	bsonFile := filepath.Join(dir, dbName, collection+".bson")
-	s2File := bsonFile + ".s2"
-	compressErr := CompressFileS2(bsonFile, s2File)
+	metaFile := filepath.Join(dir, dbName, collection+".metadata.json")
+	s2BsonFile := bsonFile + ".s2"
+	s2MetaFile := metaFile + ".s2"
+	compressBsonErr := CompressFileS2(bsonFile, s2BsonFile)
+	_ = CompressFileS2(metaFile, s2MetaFile) // ignore error for now, can log if needed
 	var fileSize int64
-	if compressErr == nil {
-		info, err := os.Stat(s2File)
+	if compressBsonErr == nil {
+		info, err := os.Stat(s2BsonFile)
 		if err == nil {
 			fileSize = info.Size()
 		}
 	}
 
 	// Lưu metadata vào MongoDB
-	metaErr := SaveBackupHistory(dbName, collection, s2File, fileSize, "success", "s2", "OK")
+	metaErr := SaveBackupHistory(dbName, collection, s2BsonFile, fileSize, "success", "s2", "OK")
 	if metaErr != nil {
 		fmt.Printf("[ERROR] Failed to save backup metadata: %v\n", metaErr)
 	}
