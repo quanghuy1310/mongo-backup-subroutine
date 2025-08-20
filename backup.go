@@ -7,9 +7,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
+)
+
+// BackupStatus defines enum for backup result
+type BackupStatus string
+
+const (
+	StatusSuccess BackupStatus = "success"
+	StatusFailed  BackupStatus = "failed"
+	StatusSkipped BackupStatus = "skipped"
 )
 
 // BackupResult stores the result of a backup
@@ -19,7 +29,7 @@ type BackupResult struct {
 	BsonFile   string
 	MetaFile   string
 	FileSize   int64
-	Status     string
+	Status     BackupStatus
 	Error      error
 }
 
@@ -28,28 +38,28 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	result := BackupResult{
 		Database:   dbName,
 		Collection: fmt.Sprintf("GPS_%s", FormatDate(date)),
-		Status:     "failed",
+		Status:     StatusFailed,
 	}
 
 	dir, err := BackupDir(dbName, date)
 	if err != nil {
-		Error.Printf("Failed to get backup dir: %v", err)
+		Error.Printf("Backup failed: DB=%s Collection=%s Error=%v", dbName, result.Collection, err)
 		result.Error = err
 		return result
 	}
-	Info.Printf("Starting backup for DB=%s, Collection=%s", dbName, result.Collection)
-	Info.Printf("Worker count: %d", AppConfig.WorkerCount)
+
+	Info.Printf("Start backup: DB=%s Collection=%s", dbName, result.Collection)
 
 	// Check if already backed up
 	done, err := IsBackupDone(dbName, result.Collection)
 	if err != nil {
-		Error.Printf("Failed to check backup status: %v", err)
+		Error.Printf("Backup failed: DB=%s Collection=%s Error=%v", dbName, result.Collection, err)
 		result.Error = err
 		return result
 	}
 	if done {
-		Info.Printf("Backup already exists: DB=%s, Collection=%s", dbName, result.Collection)
-		result.Status = "exists"
+		Info.Printf("Backup skipped: DB=%s Collection=%s Reason=already exists", dbName, result.Collection)
+		result.Status = StatusSkipped
 		return result
 	}
 
@@ -63,12 +73,11 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 		"--collection", result.Collection,
 		"--out", dir,
 	)
-	Info.Printf("Running mongodump: %s", cmd.String())
 	output, err := cmd.CombinedOutput()
 
 	if ctx.Err() == context.DeadlineExceeded {
-		Error.Printf("mongodump timed out for DB=%s, Collection=%s", dbName, result.Collection)
-		SaveBackupStatus(dbName, result.Collection, "failed", "timeout")
+		Error.Printf("Backup failed: DB=%s Collection=%s Error=timeout", dbName, result.Collection)
+		SaveBackupStatus(dbName, result.Collection, string(StatusFailed), "timeout")
 		result.Error = ctx.Err()
 		return result
 	}
@@ -76,14 +85,14 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	if err != nil {
 		outStr := string(output)
 		if strings.Contains(outStr, "ns not found") || strings.Contains(outStr, fmt.Sprintf("collection '%s' does not exist", result.Collection)) {
-			Info.Printf("Collection %s does not exist in DB %s, skipping backup", result.Collection, dbName)
-			result.Status = "skipped"
-			SaveBackupStatus(dbName, result.Collection, "skipped", "collection not found")
-			result.Error = errors.New("skipped") // notify main.go
+			Info.Printf("Backup skipped: DB=%s Collection=%s Reason=collection not found", dbName, result.Collection)
+			result.Status = StatusSkipped
+			SaveBackupStatus(dbName, result.Collection, string(StatusSkipped), "collection not found")
+			result.Error = errors.New("skipped")
 			return result
 		}
-		Error.Printf("mongodump failed: %v\nOutput: %s", err, outStr)
-		SaveBackupStatus(dbName, result.Collection, "failed", outStr)
+		Error.Printf("Backup failed: DB=%s Collection=%s Error=%v Output=%s", dbName, result.Collection, err, outStr)
+		SaveBackupStatus(dbName, result.Collection, string(StatusFailed), outStr)
 		result.Error = fmt.Errorf("%v (output: %s)", err, outStr)
 		return result
 	}
@@ -94,11 +103,9 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	s2BsonFile := bsonFile + ".s2"
 	s2MetaFile := metaFile + ".s2"
 
-	// Check BSON exists
 	if _, err := os.Stat(bsonFile); os.IsNotExist(err) {
-		Info.Printf("BSON file not found for DB=%s, Collection=%s, skipping", dbName, result.Collection)
-		result.Status = "skipped"
-		SaveBackupStatus(dbName, result.Collection, "skipped", "BSON not found")
+		Info.Printf("Backup skipped: DB=%s Collection=%s Reason=BSON not found", dbName, result.Collection)
+		result.Status = StatusSkipped
 		result.Error = errors.New("skipped")
 		return result
 	}
@@ -109,28 +116,27 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 		metaFile: s2MetaFile,
 	}
 	if err := CompressFilesS2(filesToCompress); err != nil {
-		Error.Printf("Failed to compress files: %v", err)
+		Error.Printf("Backup failed: DB=%s Collection=%s Error=compress error %v", dbName, result.Collection, err)
 		result.Error = err
-		SaveBackupStatus(dbName, result.Collection, "failed", "compress error")
+		SaveBackupStatus(dbName, result.Collection, string(StatusFailed), "compress error")
 		return result
 	}
 
-	// Set result
 	if info, err := os.Stat(s2BsonFile); err == nil {
 		result.FileSize = info.Size()
 	}
 	result.BsonFile = s2BsonFile
 	result.MetaFile = s2MetaFile
-	result.Status = "success"
+	result.Status = StatusSuccess
 	result.Error = nil
 
 	// Save metadata
-	if metaErr := SaveBackupHistory(dbName, result.Collection, s2BsonFile, s2MetaFile, result.FileSize, "success", "s2", "OK"); metaErr != nil {
+	if metaErr := SaveBackupHistory(dbName, result.Collection, s2BsonFile, s2MetaFile, result.FileSize, string(StatusSuccess), "s2", "OK"); metaErr != nil {
 		Error.Printf("Failed to save backup metadata: %v", metaErr)
 	}
 
-	SaveBackupStatus(dbName, result.Collection, "success", "OK")
-	Info.Printf("Backup successful: DB=%s, Collection=%s", dbName, result.Collection)
+	SaveBackupStatus(dbName, result.Collection, string(StatusSuccess), "OK")
+	Info.Printf("Backup success: DB=%s Collection=%s File=%s Size=%d", dbName, result.Collection, s2BsonFile, result.FileSize)
 
 	// Cleanup raw files
 	if !AppConfig.KeepRawFiles {
@@ -156,14 +162,13 @@ func BackupWithRetry(dbName string, date time.Time) (int, error) {
 			return attempt, nil
 		}
 		if !isRecoverableError(res.Error) {
-			Error.Printf("Non-recoverable error: %v", res.Error)
+			Error.Printf("Backup non-recoverable: DB=%s Collection=%s Error=%v", dbName, res.Collection, res.Error)
 			return attempt, res.Error
 		}
 		lastErr = res.Error
-		Info.Printf("Backup failed, retrying after %s (attempt %d/%d)", AppConfig.RetryInterval, attempt, AppConfig.MaxRetries)
 		time.Sleep(AppConfig.RetryInterval)
 	}
-	Error.Printf("Backup failed after max retries: %s %s", dbName, FormatDate(date))
+	Error.Printf("Backup failed after max retries: DB=%s Collection=%s Error=%v", dbName, FormatDate(date), lastErr)
 	return attempt, lastErr
 }
 
@@ -176,6 +181,83 @@ func isRecoverableError(err error) bool {
 		return false
 	}
 	return true
+}
+
+func RunFullBackup(backupDate time.Time) {
+	dbs, err := ListProviderDatabases()
+	if err != nil {
+		Error.Printf("Failed to list databases: %v", err)
+		return
+	}
+	if len(dbs) == 0 {
+		Info.Println("No databases found for backup.")
+		return
+	}
+
+	Info.Printf("Starting backup for %d databases", len(dbs))
+	workerCount := AppConfig.WorkerCount
+	if workerCount <= 0 {
+		workerCount = 2 * runtime.NumCPU()
+	}
+
+	type BackupResult struct {
+		DBName     string
+		Status     string
+		Error      error
+		Retries    int
+		SkipReason string
+	}
+
+	jobs := make(chan string, len(dbs))
+	results := make(chan BackupResult, len(dbs))
+	var wg sync.WaitGroup
+
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for dbName := range jobs {
+				attempts, err := BackupWithRetry(dbName, backupDate)
+				status := "success"
+				skipReason := ""
+				if err != nil {
+					if err.Error() == "skipped" {
+						status = "skipped"
+						skipReason = "collection not found"
+					} else {
+						status = "failed"
+					}
+				}
+				results <- BackupResult{
+					DBName:     dbName,
+					Status:     status,
+					Error:      err,
+					Retries:    attempts,
+					SkipReason: skipReason,
+				}
+			}
+		}(w + 1)
+	}
+
+	for _, db := range dbs {
+		jobs <- db
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	for res := range results {
+		switch res.Status {
+		case "success":
+			Info.Printf("[SUCCESS] DB=%s (retries=%d)", res.DBName, res.Retries)
+		case "skipped":
+			Warn.Printf("[SKIPPED] DB=%s (%s)", res.DBName, res.SkipReason)
+		case "failed":
+			Error.Printf("[FAILED] DB=%s (retries=%d, error=%v)", res.DBName, res.Retries, res.Error)
+		default:
+			Warn.Printf("[UNKNOWN STATUS] DB=%s: %s", res.DBName, res.Status)
+		}
+	}
 }
 
 // Backup multiple DBs concurrently
@@ -191,9 +273,9 @@ func BackupDatabasesConcurrently(dbs []string, date time.Time) {
 			defer func() { <-sem }()
 			attempts, err := BackupWithRetry(dbName, date)
 			if err != nil {
-				Error.Printf("Backup failed for DB=%s after %d attempts: %v", dbName, attempts, err)
+				Error.Printf("Backup finished: DB=%s Status=failed Attempts=%d Error=%v", dbName, attempts, err)
 			} else {
-				Info.Printf("Backup succeeded for DB=%s in %d attempts", dbName, attempts)
+				Info.Printf("Backup finished: DB=%s Status=%s Attempts=%d", dbName, StatusSuccess, attempts)
 			}
 		}(db)
 	}

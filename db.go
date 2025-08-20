@@ -23,15 +23,13 @@ func ConnectMongo(uri string) error {
 		return fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
 
-	// Ping to ensure connection works
 	if err := client.Ping(ctx, nil); err != nil {
 		return fmt.Errorf("failed to ping MongoDB: %w", err)
 	}
 
 	mongoClient = client
-	Info.Println("Successfully connected to MongoDB")
+	Info.Println("MongoDB connected successfully")
 
-	// Ensure indexes
 	if err := EnsureIndexes(); err != nil {
 		Error.Printf("Failed to ensure indexes: %v", err)
 	}
@@ -97,7 +95,7 @@ func SaveBackupStatus(dbName, date, status, msg string) error {
 	if err != nil {
 		Error.Printf("Failed to save backup status for %s (%s): %v", dbName, date, err)
 	} else {
-		Info.Printf("Backup status saved for %s (%s): %s", dbName, date, status)
+		Info.Printf("Backup status saved: %s (%s) -> %s", dbName, date, status)
 	}
 	return err
 }
