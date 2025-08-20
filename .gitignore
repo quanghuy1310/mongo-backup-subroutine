@@ -1,6 +1,6 @@
 # Ignore environment files
 .env
-
+*backup.log
 *.out
 
 # Ignore IDE/editor folders

@@ -4,3 +4,6 @@
 [INFO] 2025/08/20 15:40:22 Config loaded: {MongoURI:mongodb://192.168.34.22:27017/?replicaSet=GSHT BackupPath:/mnt/mongo_backup MongodumpPath:/usr/bin/mongodump Compression:s2 RetryInterval:5m0s MaxRetries:5 MaxRetryDays:7 BackupTimeout:15m0s KeepRawFiles:false WorkerCount:16 LogFile:/var/log/mongo_backup.log}
 [INFO] 2025/08/20 15:40:22 Mongo Backup Subroutine v2.0 starting...
 [ERROR] 2025/08/20 15:40:32 Failed to connect MongoDB: failed to ping MongoDB: server selection error: context deadline exceeded, current topology: { Type: ReplicaSetNoPrimary, Servers: [{ Addr: 192.168.34.22:27017, Type: Unknown }, ] }
+[INFO] 2025/08/20 16:06:31 Config loaded: {MongoURI:mongodb://192.168.34.22:27017/?replicaSet=GSHT BackupPath:/mnt/mongo_backup MongodumpPath:/usr/bin/mongodump Compression:s2 RetryInterval:5m0s MaxRetries:5 MaxRetryDays:7 BackupTimeout:15m0s KeepRawFiles:false WorkerCount:16 LogFile:/var/log/mongo_backup.log}
+[INFO] 2025/08/20 16:06:31 Mongo Backup Subroutine v2.0 starting...
+[ERROR] 2025/08/20 16:06:41 Failed to connect MongoDB: failed to ping MongoDB: server selection error: context deadline exceeded, current topology: { Type: ReplicaSetNoPrimary, Servers: [{ Addr: 192.168.34.22:27017, Type: Unknown }, ] }
