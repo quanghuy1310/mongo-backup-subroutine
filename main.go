@@ -9,13 +9,14 @@ import (
 )
 
 func main() {
-	logPrint("INFO", "Mongo Backup Subroutine v2.0 starting...")
+	InitLogger(AppConfig.LogFile)
 	LoadConfig()
+	Info.Println("Mongo Backup Subroutine v2.0 starting...")
 
 	// Kết nối MongoDB
 	err := ConnectMongo(AppConfig.MongoURI)
 	if err != nil {
-		logPrint("ERROR", fmt.Sprintf("Failed to connect MongoDB: %v", err))
+		Error.Printf("Failed to connect MongoDB: %v", err)
 		os.Exit(1)
 	}
 	defer DisconnectMongo()
@@ -26,30 +27,30 @@ func main() {
 	// Lấy danh sách database cần backup
 	dbs, err := ListProviderDatabases()
 	if err != nil {
-		logPrint("ERROR", fmt.Sprintf("Failed to list databases: %v", err))
+		Error.Printf("Failed to list databases: %v", err)
 		os.Exit(1)
 	}
 	if len(dbs) == 0 {
-		logPrint("INFO", "No databases found for backup. Exiting.")
+		Info.Println("No databases found for backup. Exiting.")
 		return
 	}
 
-	logPrint("INFO", fmt.Sprintf("Found %d databases to backup.", len(dbs)))
-	logPrint("INFO", fmt.Sprintf("Worker count: %d", AppConfig.WorkerCount))
+	Info.Printf("Found %d databases to backup.", len(dbs))
+	Info.Printf("Worker count: %d", AppConfig.WorkerCount)
 
-	// Kết quả backup từng database
 	type BackupResult struct {
-		DBName  string
-		Status  string // "success", "failed", "skipped"
-		Error   error
-		Retries int
+		DBName     string
+		Status     string // "success", "failed", "skipped"
+		Error      error
+		Retries    int
+		SkipReason string
 	}
 
-	// Worker setup
+	// Setup workers
 	workerCount := AppConfig.WorkerCount
 	if workerCount <= 0 {
 		workerCount = runtime.NumCPU() * 2
-		logPrint("WARN", fmt.Sprintf("Invalid WORKER_COUNT, fallback to %d workers", workerCount))
+		Info.Printf("Invalid WORKER_COUNT, fallback to %d workers", workerCount)
 	}
 
 	jobs := make(chan string, len(dbs))
@@ -61,28 +62,31 @@ func main() {
 		go func(workerID int) {
 			defer wg.Done()
 			for dbName := range jobs {
-				logPrint("INFO", fmt.Sprintf("[Worker %d] Starting backup for DB: %s", workerID, dbName))
+				Info.Printf("[Worker %d] Starting backup for DB: %s", workerID, dbName)
 
-				// Retry + backup
-				retries, err := BackupWithRetry(dbName, backupDate)
+				attempts, err := BackupWithRetry(dbName, backupDate)
 				status := "success"
+				skipReason := ""
+
 				if err != nil {
-					if err.Error() == "skipped" { // BackupDatabase trả về error = "skipped" nếu collection không tồn tại
+					if err.Error() == "skipped" {
 						status = "skipped"
-						logPrint("WARN", fmt.Sprintf("[Worker %d] Backup skipped for DB %s (collection not found)", workerID, dbName))
+						skipReason = "collection not found"
+						Info.Printf("[Worker %d] Backup skipped for DB %s (%s)", workerID, dbName, skipReason)
 					} else {
 						status = "failed"
-						logPrint("ERROR", fmt.Sprintf("[Worker %d] Backup failed for DB %s after %d retries: %v", workerID, dbName, retries, err))
+						Error.Printf("[Worker %d] Backup failed for DB %s after %d retries: %v", workerID, dbName, attempts, err)
 					}
 				} else {
-					logPrint("INFO", fmt.Sprintf("[Worker %d] Backup completed for DB %s (retries: %d)", workerID, dbName, retries))
+					Info.Printf("[Worker %d] Backup completed for DB %s (retries: %d)", workerID, dbName, attempts)
 				}
 
 				results <- BackupResult{
-					DBName:  dbName,
-					Status:  status,
-					Error:   err,
-					Retries: retries,
+					DBName:     dbName,
+					Status:     status,
+					Error:      err,
+					Retries:    attempts,
+					SkipReason: skipReason,
 				}
 			}
 		}(w + 1)
@@ -110,7 +114,7 @@ func main() {
 			fmt.Printf("- %s: ✅ success (retries: %d)\n", res.DBName, res.Retries)
 			successCount++
 		case "skipped":
-			fmt.Printf("- %s: ⚠️ skipped (collection not found)\n", res.DBName)
+			fmt.Printf("- %s: ⚠️ skipped (%s)\n", res.DBName, res.SkipReason)
 			skippedCount++
 		case "failed":
 			fmt.Printf("- %s: ❌ failed (after %d retries, error: %v)\n", res.DBName, res.Retries, res.Error)
@@ -118,6 +122,6 @@ func main() {
 		}
 	}
 
-	fmt.Printf("\nTotal: %d, Success: %d, Skipped: %d, Failed: %d\n", len(dbs), successCount, skippedCount, failCount)
-	logPrint("INFO", "All backups finished.")
+	Info.Printf("Backup Summary: Total=%d, Success=%d, Skipped=%d, Failed=%d", len(dbs), successCount, skippedCount, failCount)
+	Info.Println("All backups finished.")
 }

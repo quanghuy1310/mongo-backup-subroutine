@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"runtime"
 	"strconv"
@@ -21,55 +20,55 @@ type Config struct {
 	BackupTimeout time.Duration
 	KeepRawFiles  bool
 	WorkerCount   int
+	LogFile       string // Path to log file
 }
 
 var AppConfig Config
 
 func LoadConfig() {
-	err := godotenv.Load()
-	if err != nil {
-		logPrint("WARN", "Can't load .env file, using environment variables")
+	if err := godotenv.Load(); err != nil {
+		Warn.Println("Can't load .env file, using environment variables")
 	}
 
-	// Retry interval (support REATTEMPT_INTERVAL or REATTEMPT_INTERVAL_MIN)
-	retryInterval := 5 * time.Minute // default
+	// Retry interval
+	retryInterval := 5 * time.Minute
 	if v := os.Getenv("RETRY_INTERVAL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			retryInterval = d
 		} else {
-			logPrint("ERROR", fmt.Sprintf("Invalid RETRY_INTERVAL: %v", err))
+			Error.Printf("Invalid RETRY_INTERVAL: %v", err)
 		}
 	} else if v := os.Getenv("RETRY_INTERVAL_MIN"); v != "" {
 		if min, err := strconv.Atoi(v); err == nil && min > 0 {
 			retryInterval = time.Duration(min) * time.Minute
 		} else {
-			logPrint("ERROR", fmt.Sprintf("Invalid RETRY_INTERVAL_MIN: %v", err))
+			Error.Printf("Invalid RETRY_INTERVAL_MIN: %v", err)
 		}
 	}
 
-	// Backup timeout (default 10m)
+	// Backup timeout
 	backupTimeout := 10 * time.Minute
 	if v := os.Getenv("BACKUP_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			backupTimeout = d
 		} else {
-			logPrint("ERROR", fmt.Sprintf("Invalid BACKUP_TIMEOUT: %v", err))
+			Error.Printf("Invalid BACKUP_TIMEOUT: %v", err)
 		}
 	}
 
-	// Keep raw files (default false)
+	// Keep raw files
 	keepRawFiles := false
 	if v := os.Getenv("KEEP_RAW_FILES"); v == "1" || v == "true" || v == "TRUE" {
 		keepRawFiles = true
 	}
 
-	// WorkerCount (default: runtime.NumCPU())
+	// Worker count
 	workerCount := runtime.NumCPU()
 	if v := os.Getenv("WORKER_COUNT"); v != "" {
 		if val, err := strconv.Atoi(v); err == nil && val > 0 {
 			workerCount = val
 		} else {
-			logPrint("WARN", fmt.Sprintf("Invalid WORKER_COUNT: %s, fallback to %d", v, workerCount))
+			Warn.Printf("Invalid WORKER_COUNT: %s, fallback to %d", v, workerCount)
 		}
 	}
 
@@ -84,20 +83,24 @@ func LoadConfig() {
 		BackupTimeout: backupTimeout,
 		KeepRawFiles:  keepRawFiles,
 		WorkerCount:   workerCount,
+		LogFile:       os.Getenv("LOG_FILE"),
 	}
 
-	// Validate config
+	// Validate
 	if AppConfig.MongoURI == "" {
-		logPrint("ERROR", "MONGO_URI is required in .env")
+		Error.Println("MONGO_URI is required in .env")
+		os.Exit(1)
 	}
 	if AppConfig.BackupPath == "" {
-		logPrint("ERROR", "BACKUP_PATH is required in .env")
+		Error.Println("BACKUP_PATH is required in .env")
+		os.Exit(1)
 	}
 	if AppConfig.MongodumpPath == "" {
-		AppConfig.MongodumpPath = "mongodump" // fallback to default
+		Info.Println("MONGODUMP_PATH not set, using default 'mongodump'")
+		AppConfig.MongodumpPath = "mongodump"
 	}
 
-	logPrint("INFO", fmt.Sprintf("Config loaded: %+v", AppConfig))
+	Info.Printf("Config loaded: %+v", AppConfig)
 }
 
 func atoiDefault(s string, def int) int {
@@ -105,8 +108,4 @@ func atoiDefault(s string, def int) int {
 		return v
 	}
 	return def
-}
-
-func logPrint(level, msg string) {
-	fmt.Printf("[%s] %s %s\n", level, time.Now().Format("2006-01-02 15:04:05"), msg)
 }

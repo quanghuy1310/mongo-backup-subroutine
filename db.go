@@ -23,17 +23,17 @@ func ConnectMongo(uri string) error {
 		return fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
 
-	// Ping để đảm bảo kết nối hoạt động
+	// Ping to ensure connection works
 	if err := client.Ping(ctx, nil); err != nil {
 		return fmt.Errorf("failed to ping MongoDB: %w", err)
 	}
 
 	mongoClient = client
-	logPrint("INFO", "Successfully connected to MongoDB")
+	Info.Println("Successfully connected to MongoDB")
 
-	// Đảm bảo có index
+	// Ensure indexes
 	if err := EnsureIndexes(); err != nil {
-		logPrint("ERROR", fmt.Sprintf("Failed to ensure indexes: %v", err))
+		Error.Printf("Failed to ensure indexes: %v", err)
 	}
 
 	return nil
@@ -48,9 +48,9 @@ func DisconnectMongo() {
 	defer cancel()
 
 	if err := mongoClient.Disconnect(ctx); err != nil {
-		logPrint("ERROR", fmt.Sprintf("Failed to disconnect MongoDB: %v", err))
+		Error.Printf("Failed to disconnect MongoDB: %v", err)
 	} else {
-		logPrint("INFO", "MongoDB connection closed")
+		Info.Println("MongoDB connection closed")
 	}
 }
 
@@ -61,6 +61,9 @@ func GetMongoClient() *mongo.Client {
 
 // EnsureIndexes creates indexes for backup collections
 func EnsureIndexes() error {
+	if mongoClient == nil {
+		return fmt.Errorf("mongoClient is nil")
+	}
 	coll := mongoClient.Database("admin").Collection("backupStatus")
 	_, err := coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
 		Keys: bson.D{
@@ -69,11 +72,17 @@ func EnsureIndexes() error {
 			{Key: "status", Value: 1},
 		},
 	})
+	if err == nil {
+		Info.Println("Indexes ensured on backupStatus collection")
+	}
 	return err
 }
 
 // SaveBackupStatus inserts backup status document
 func SaveBackupStatus(dbName, date, status, msg string) error {
+	if mongoClient == nil {
+		return fmt.Errorf("mongoClient is nil")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -85,11 +94,19 @@ func SaveBackupStatus(dbName, date, status, msg string) error {
 		"message":   msg,
 		"timestamp": time.Now(),
 	})
+	if err != nil {
+		Error.Printf("Failed to save backup status for %s (%s): %v", dbName, date, err)
+	} else {
+		Info.Printf("Backup status saved for %s (%s): %s", dbName, date, status)
+	}
 	return err
 }
 
 // IsBackupDone checks if backup for db+date succeeded
 func IsBackupDone(dbName, date string) (bool, error) {
+	if mongoClient == nil {
+		return false, fmt.Errorf("mongoClient is nil")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -99,17 +116,23 @@ func IsBackupDone(dbName, date string) (bool, error) {
 		"date":     date,
 		"status":   "success",
 	})
+	if err != nil {
+		Error.Printf("Failed to check backup done for %s (%s): %v", dbName, date, err)
+	}
 	return count > 0, err
 }
 
 // ListProviderDatabases returns databases matching YYYY_providerId
 func ListProviderDatabases() ([]string, error) {
+	if mongoClient == nil {
+		return nil, fmt.Errorf("mongoClient is nil")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	dbs, err := mongoClient.ListDatabaseNames(ctx, bson.M{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to list databases: %w", err)
 	}
 
 	var filtered []string
@@ -119,5 +142,7 @@ func ListProviderDatabases() ([]string, error) {
 			filtered = append(filtered, db)
 		}
 	}
+
+	Info.Printf("Found %d provider databases for backup", len(filtered))
 	return filtered, nil
 }
