@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -12,6 +13,7 @@ import (
 
 var mongoClient *mongo.Client
 
+// Connect to MongoDB
 func ConnectMongo(uri string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -21,20 +23,55 @@ func ConnectMongo(uri string) error {
 		return err
 	}
 
-	// Ping để xác nhận kết nối thành công
+	// Ping to confirm connection
 	if err := client.Ping(ctx, nil); err != nil {
 		return err
 	}
 
 	mongoClient = client
-	fmt.Println("[INFO] Successfully connected to MongoDB!")
+	logPrint("INFO", "Successfully connected to MongoDB")
+
+	// Ensure indexes exist
+	if err := EnsureIndexes(); err != nil {
+		logPrint("ERROR", fmt.Sprintf("Failed to ensure indexes: %v", err))
+	}
+
 	return nil
+}
+
+// Disconnect from MongoDB
+func DisconnectMongo() {
+	if mongoClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := mongoClient.Disconnect(ctx); err != nil {
+			logPrint("ERROR", fmt.Sprintf("Failed to disconnect MongoDB: %v", err))
+		} else {
+			logPrint("INFO", "MongoDB connection closed")
+		}
+	}
+}
+
+// EnsureIndexes creates useful indexes for backup collections
+func EnsureIndexes() error {
+	coll := mongoClient.Database("admin").Collection("backupStatus")
+	_, err := coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "database", Value: 1},
+			{Key: "date", Value: 1},
+			{Key: "status", Value: 1},
+		},
+	})
+	return err
 }
 
 // Save backup status
 func SaveBackupStatus(dbName, date, status, msg string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	coll := mongoClient.Database("admin").Collection("backupStatus")
-	_, err := coll.InsertOne(context.Background(), bson.M{
+	_, err := coll.InsertOne(ctx, bson.M{
 		"database":  dbName,
 		"date":      date,
 		"status":    status,
@@ -46,8 +83,11 @@ func SaveBackupStatus(dbName, date, status, msg string) error {
 
 // Check if backup was successful
 func IsBackupDone(dbName, date string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	coll := mongoClient.Database("admin").Collection("backupStatus")
-	count, err := coll.CountDocuments(context.Background(), bson.M{
+	count, err := coll.CountDocuments(ctx, bson.M{
 		"database": dbName,
 		"date":     date,
 		"status":   "success",
@@ -55,7 +95,7 @@ func IsBackupDone(dbName, date string) (bool, error) {
 	return count > 0, err
 }
 
-// Get list of all databases in YYYY_ProviderID format
+// Get list of provider databases (pattern: YYYY_providerId)
 func ListProviderDatabases() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -66,8 +106,9 @@ func ListProviderDatabases() ([]string, error) {
 	}
 
 	var filtered []string
+	providerDbPattern := regexp.MustCompile(`^\d{4}_.+`)
 	for _, db := range dbs {
-		if len(db) >= 5 && db[4] == '_' { // simple YYYY_ProviderID check
+		if providerDbPattern.MatchString(db) {
 			filtered = append(filtered, db)
 		}
 	}

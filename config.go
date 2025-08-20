@@ -17,6 +17,8 @@ type Config struct {
 	RetryInterval time.Duration
 	MaxRetries    int
 	MaxRetryDays  int
+	BackupTimeout time.Duration
+	KeepRawFiles  bool
 }
 
 var AppConfig Config
@@ -47,6 +49,24 @@ func LoadConfig() {
 		retryInterval = 5 * time.Minute
 	}
 
+	// Backup timeout (default 10m)
+	backupTimeout := 10 * time.Minute
+	if v := os.Getenv("BACKUP_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			backupTimeout = d
+		} else {
+			logPrint("ERROR", fmt.Sprintf("Invalid BACKUP_TIMEOUT: %v", err))
+		}
+	}
+
+	// Keep raw files (default false)
+	keepRawFiles := false
+	if v := os.Getenv("KEEP_RAW_FILES"); v != "" {
+		if v == "1" || v == "true" || v == "TRUE" {
+			keepRawFiles = true
+		}
+	}
+
 	AppConfig = Config{
 		MongoURI:      os.Getenv("MONGO_URI"),
 		BackupPath:    os.Getenv("BACKUP_PATH"),
@@ -55,6 +75,8 @@ func LoadConfig() {
 		RetryInterval: retryInterval,
 		MaxRetries:    atoiDefault(os.Getenv("MAX_RETRIES"), 5),
 		MaxRetryDays:  atoiDefault(os.Getenv("MAX_RETRY_DAYS"), 7),
+		BackupTimeout: backupTimeout,
+		KeepRawFiles:  keepRawFiles,
 	}
 
 	// Validate config
