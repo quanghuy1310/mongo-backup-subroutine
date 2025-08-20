@@ -16,15 +16,16 @@ func FormatDate(t time.Time) string {
 	return t.Format("2006_01_02")
 }
 
-// BackupDir trả về đường dẫn backup chuẩn, tạo folder nếu chưa tồn tại
+// BackupDir trả về đường dẫn backup chuẩn: /<BackupPath>/<DB>/<Collection>/
+// Tạo folder nếu chưa tồn tại, không tạo thêm 1 cấp con thừa
 func BackupDir(dbName string, date time.Time) string {
-	parent := fmt.Sprintf("%s/%s", AppConfig.BackupPath, dbName)
-	collection := fmt.Sprintf("GPS_%s", FormatDate(date))
-	dir := fmt.Sprintf("%s/%s", parent, collection)
+	dir := filepath.Join(AppConfig.BackupPath, dbName, fmt.Sprintf("GPS_%s", FormatDate(date)))
+
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "[ERROR] Failed to create backup directory: %v\n", err)
 		return ""
 	}
+
 	return dir
 }
 
@@ -104,8 +105,8 @@ func BulkRestore(restoreList []string, dbName, collection string) {
 			"--uri", AppConfig.MongoURI,
 			"--db", dbName,
 			"--collection", collection,
-			"--drop",      // optional: drop collection before restore
-			restoreFolder, // pass folder, not individual file
+			"--drop",      // drop collection before restore
+			restoreFolder, // pass folder
 		)
 
 		output, err := cmd.CombinedOutput()
@@ -116,7 +117,7 @@ func BulkRestore(restoreList []string, dbName, collection string) {
 
 		fmt.Printf("[INFO] Restore successful for %s (BSON + metadata)\n", restoreFolder)
 
-		// Optional cleanup: remove decompressed files if you want
+		// Optional cleanup: remove decompressed files if configured
 		if !AppConfig.KeepRawFiles {
 			os.Remove(bsonFile)
 			os.Remove(metaFile)

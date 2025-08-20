@@ -35,22 +35,22 @@ func main() {
 	}
 
 	logPrint("INFO", fmt.Sprintf("Found %d databases to backup.", len(dbs)))
+	logPrint("INFO", fmt.Sprintf("Worker count: %d", AppConfig.WorkerCount))
 
 	// Kết quả backup từng database
 	type BackupResult struct {
 		DBName  string
-		Status  string
+		Status  string // "success", "failed", "skipped"
 		Error   error
 		Retries int
 	}
 
-	// Worker
+	// Worker setup
 	workerCount := AppConfig.WorkerCount
 	if workerCount <= 0 {
-		workerCount = runtime.NumCPU() * 2 // fallback to 2x CPU cores
+		workerCount = runtime.NumCPU() * 2
 		logPrint("WARN", fmt.Sprintf("Invalid WORKER_COUNT, fallback to %d workers", workerCount))
 	}
-	logPrint("INFO", fmt.Sprintf("Using %d workers.", workerCount))
 
 	jobs := make(chan string, len(dbs))
 	results := make(chan BackupResult, len(dbs))
@@ -58,19 +58,24 @@ func main() {
 	var wg sync.WaitGroup
 	for w := 0; w < workerCount; w++ {
 		wg.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
 			for dbName := range jobs {
-				logPrint("INFO", fmt.Sprintf("[Worker] Starting backup for DB: %s", dbName))
+				logPrint("INFO", fmt.Sprintf("[Worker %d] Starting backup for DB: %s", workerID, dbName))
 
 				// Retry + backup
 				retries, err := BackupWithRetry(dbName, backupDate)
 				status := "success"
 				if err != nil {
-					status = "failed"
-					logPrint("ERROR", fmt.Sprintf("Backup failed for DB %s after %d retries: %v", dbName, retries, err))
+					if err.Error() == "skipped" { // BackupDatabase trả về error = "skipped" nếu collection không tồn tại
+						status = "skipped"
+						logPrint("WARN", fmt.Sprintf("[Worker %d] Backup skipped for DB %s (collection not found)", workerID, dbName))
+					} else {
+						status = "failed"
+						logPrint("ERROR", fmt.Sprintf("[Worker %d] Backup failed for DB %s after %d retries: %v", workerID, dbName, retries, err))
+					}
 				} else {
-					logPrint("INFO", fmt.Sprintf("Backup completed for DB %s (retries: %d)", dbName, retries))
+					logPrint("INFO", fmt.Sprintf("[Worker %d] Backup completed for DB %s (retries: %d)", workerID, dbName, retries))
 				}
 
 				results <- BackupResult{
@@ -80,7 +85,7 @@ func main() {
 					Retries: retries,
 				}
 			}
-		}()
+		}(w + 1)
 	}
 
 	// Push jobs
@@ -96,17 +101,23 @@ func main() {
 	// Summary
 	successCount := 0
 	failCount := 0
+	skippedCount := 0
+
 	fmt.Println("\nBackup Summary:")
 	for res := range results {
-		if res.Status == "success" {
+		switch res.Status {
+		case "success":
 			fmt.Printf("- %s: ✅ success (retries: %d)\n", res.DBName, res.Retries)
 			successCount++
-		} else {
+		case "skipped":
+			fmt.Printf("- %s: ⚠️ skipped (collection not found)\n", res.DBName)
+			skippedCount++
+		case "failed":
 			fmt.Printf("- %s: ❌ failed (after %d retries, error: %v)\n", res.DBName, res.Retries, res.Error)
 			failCount++
 		}
 	}
 
-	fmt.Printf("\nTotal: %d, Success: %d, Failed: %d\n", len(dbs), successCount, failCount)
+	fmt.Printf("\nTotal: %d, Success: %d, Skipped: %d, Failed: %d\n", len(dbs), successCount, skippedCount, failCount)
 	logPrint("INFO", "All backups finished.")
 }

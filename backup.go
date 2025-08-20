@@ -31,6 +31,7 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 
 	dir := BackupDir(dbName, date)
 	log.Printf("[DEBUG] Starting backup for DB=%s, date=%s", dbName, FormatDate(date))
+	log.Printf("[INFO] Worker count: %d", AppConfig.WorkerCount) // log worker count
 
 	// check if already backed up
 	done, err := IsBackupDone(dbName, FormatDate(date))
@@ -45,7 +46,7 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 		return result
 	}
 
-	// run mongodump with context timeout
+	// run mongodump with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), AppConfig.BackupTimeout)
 	defer cancel()
 
@@ -55,16 +56,25 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 		"--collection", result.Collection,
 		"--out", dir,
 	)
-
 	log.Printf("[INFO] Running mongodump: %s", cmd.String())
 	output, err := cmd.CombinedOutput()
+
 	if ctx.Err() == context.DeadlineExceeded {
 		log.Printf("[ERROR] mongodump timed out")
 		SaveBackupStatus(dbName, FormatDate(date), "failed", "timeout")
 		result.Error = ctx.Err()
 		return result
 	}
+
 	if err != nil {
+		// check if collection does not exist
+		if string(output) != "" && (string(output) == fmt.Sprintf("collection '%s' does not exist", result.Collection) ||
+			string(output) == "ns not found") {
+			log.Printf("[WARN] Collection %s does not exist in DB %s, skipping backup", result.Collection, dbName)
+			result.Status = "skipped"
+			SaveBackupStatus(dbName, FormatDate(date), "skipped", "collection not found")
+			return result
+		}
 		log.Printf("[ERROR] mongodump failed: %v\nOutput: %s", err, string(output))
 		SaveBackupStatus(dbName, FormatDate(date), "failed", string(output))
 		result.Error = err
@@ -77,7 +87,15 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	s2BsonFile := bsonFile + ".s2"
 	s2MetaFile := metaFile + ".s2"
 
-	// compress BSON and metadata together using CompressFilesS2
+	// check BSON file exists
+	if _, err := os.Stat(bsonFile); os.IsNotExist(err) {
+		log.Printf("[WARN] BSON file not found for DB=%s, collection=%s, skipping", dbName, result.Collection)
+		result.Status = "skipped"
+		SaveBackupStatus(dbName, FormatDate(date), "skipped", "BSON not found")
+		return result
+	}
+
+	// compress BSON and metadata
 	filesToCompress := map[string]string{
 		bsonFile: s2BsonFile,
 		metaFile: s2MetaFile,
@@ -88,17 +106,15 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 		return result
 	}
 
-	// get file size of bson.s2
 	if info, err := os.Stat(s2BsonFile); err == nil {
 		result.FileSize = info.Size()
 	}
-
 	result.BsonFile = s2BsonFile
 	result.MetaFile = s2MetaFile
 	result.Status = "success"
 	result.Error = nil
 
-	// save metadata to MongoDB
+	// save metadata
 	if metaErr := SaveBackupHistory(dbName, result.Collection, s2BsonFile, s2MetaFile, result.FileSize, "success", "s2", "OK"); metaErr != nil {
 		log.Printf("[ERROR] Failed to save backup metadata: %v", metaErr)
 	}
