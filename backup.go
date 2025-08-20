@@ -3,14 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"time"
-
-	"github.com/klauspost/compress/s2"
 )
 
 // BackupResult stores the result of a backup
@@ -24,7 +21,7 @@ type BackupResult struct {
 	Error      error
 }
 
-// BackupDatabase performs one backup attempt
+// BackupDatabase performs one backup attempt for a single DB & date
 func BackupDatabase(dbName string, date time.Time) BackupResult {
 	result := BackupResult{
 		Database:   dbName,
@@ -80,21 +77,19 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	s2BsonFile := bsonFile + ".s2"
 	s2MetaFile := metaFile + ".s2"
 
-	// compress BSON
-	if err := CompressFileS2(bsonFile, s2BsonFile); err != nil {
-		log.Printf("[ERROR] Failed to compress BSON: %v", err)
+	// compress BSON and metadata together using CompressFilesS2
+	filesToCompress := map[string]string{
+		bsonFile: s2BsonFile,
+		metaFile: s2MetaFile,
+	}
+	if err := CompressFilesS2(filesToCompress); err != nil {
+		log.Printf("[ERROR] Failed to compress files: %v", err)
 		result.Error = err
 		return result
 	}
 
-	// compress metadata
-	if err := CompressFileS2(metaFile, s2MetaFile); err != nil {
-		log.Printf("[WARN] Failed to compress metadata: %v", err)
-	}
-
 	// get file size of bson.s2
-	info, err := os.Stat(s2BsonFile)
-	if err == nil {
+	if info, err := os.Stat(s2BsonFile); err == nil {
 		result.FileSize = info.Size()
 	}
 
@@ -104,8 +99,7 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	result.Error = nil
 
 	// save metadata to MongoDB
-	metaErr := SaveBackupHistory(dbName, result.Collection, s2BsonFile, s2MetaFile, result.FileSize, "success", "s2", "OK")
-	if metaErr != nil {
+	if metaErr := SaveBackupHistory(dbName, result.Collection, s2BsonFile, s2MetaFile, result.FileSize, "success", "s2", "OK"); metaErr != nil {
 		log.Printf("[ERROR] Failed to save backup metadata: %v", metaErr)
 	}
 
@@ -119,28 +113,6 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	}
 
 	return result
-}
-
-// Compress BSON/JSON file to s2 format
-func CompressFileS2(srcPath, dstPath string) error {
-	in, err := os.Open(srcPath)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dstPath)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	writer := s2.NewWriter(out)
-	defer writer.Close()
-
-	buf := make([]byte, 1<<20) // 1MB buffer
-	_, err = io.CopyBuffer(writer, in, buf)
-	return err
 }
 
 // Save backup metadata to MongoDB

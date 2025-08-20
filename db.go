@@ -13,25 +13,25 @@ import (
 
 var mongoClient *mongo.Client
 
-// Connect to MongoDB
+// ConnectMongo initializes a new MongoDB client with timeout
 func ConnectMongo(uri string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to connect to MongoDB: %w", err)
 	}
 
-	// Ping to confirm connection
+	// Ping để đảm bảo kết nối hoạt động
 	if err := client.Ping(ctx, nil); err != nil {
-		return err
+		return fmt.Errorf("failed to ping MongoDB: %w", err)
 	}
 
 	mongoClient = client
 	logPrint("INFO", "Successfully connected to MongoDB")
 
-	// Ensure indexes exist
+	// Đảm bảo có index
 	if err := EnsureIndexes(); err != nil {
 		logPrint("ERROR", fmt.Sprintf("Failed to ensure indexes: %v", err))
 	}
@@ -39,20 +39,27 @@ func ConnectMongo(uri string) error {
 	return nil
 }
 
-// Disconnect from MongoDB
+// DisconnectMongo closes MongoDB connection
 func DisconnectMongo() {
-	if mongoClient != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := mongoClient.Disconnect(ctx); err != nil {
-			logPrint("ERROR", fmt.Sprintf("Failed to disconnect MongoDB: %v", err))
-		} else {
-			logPrint("INFO", "MongoDB connection closed")
-		}
+	if mongoClient == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := mongoClient.Disconnect(ctx); err != nil {
+		logPrint("ERROR", fmt.Sprintf("Failed to disconnect MongoDB: %v", err))
+	} else {
+		logPrint("INFO", "MongoDB connection closed")
 	}
 }
 
-// EnsureIndexes creates useful indexes for backup collections
+// GetMongoClient returns the global mongoClient safely
+func GetMongoClient() *mongo.Client {
+	return mongoClient
+}
+
+// EnsureIndexes creates indexes for backup collections
 func EnsureIndexes() error {
 	coll := mongoClient.Database("admin").Collection("backupStatus")
 	_, err := coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
@@ -65,7 +72,7 @@ func EnsureIndexes() error {
 	return err
 }
 
-// Save backup status
+// SaveBackupStatus inserts backup status document
 func SaveBackupStatus(dbName, date, status, msg string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -81,7 +88,7 @@ func SaveBackupStatus(dbName, date, status, msg string) error {
 	return err
 }
 
-// Check if backup was successful
+// IsBackupDone checks if backup for db+date succeeded
 func IsBackupDone(dbName, date string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -95,7 +102,7 @@ func IsBackupDone(dbName, date string) (bool, error) {
 	return count > 0, err
 }
 
-// Get list of provider databases (pattern: YYYY_providerId)
+// ListProviderDatabases returns databases matching YYYY_providerId
 func ListProviderDatabases() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -2,28 +2,35 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"runtime"
 	"sync"
 	"time"
 )
 
 func main() {
-	logPrint("INFO", "Mongo Backup Subroutine v1.0 starting...")
+	logPrint("INFO", "Mongo Backup Subroutine v2.0 starting...")
 	LoadConfig()
 
 	// Kết nối MongoDB
 	err := ConnectMongo(AppConfig.MongoURI)
 	if err != nil {
 		logPrint("ERROR", fmt.Sprintf("Failed to connect MongoDB: %v", err))
-		return
+		os.Exit(1)
 	}
+	defer DisconnectMongo()
 
-	// Lấy ngày hôm qua để đặt tên folder backup
-	yesterday := time.Now().AddDate(0, 0, -1)
+	// Ngày backup: mặc định là hôm qua
+	backupDate := time.Now().AddDate(0, 0, -1)
 
 	// Lấy danh sách database cần backup
 	dbs, err := ListProviderDatabases()
 	if err != nil {
 		logPrint("ERROR", fmt.Sprintf("Failed to list databases: %v", err))
+		os.Exit(1)
+	}
+	if len(dbs) == 0 {
+		logPrint("INFO", "No databases found for backup. Exiting.")
 		return
 	}
 
@@ -37,7 +44,14 @@ func main() {
 		Retries int
 	}
 
-	workerCount := 5 // số worker
+	// Worker
+	workerCount := AppConfig.WorkerCount
+	if workerCount <= 0 {
+		workerCount = runtime.NumCPU() * 2 // fallback to 2x CPU cores
+		logPrint("WARN", fmt.Sprintf("Invalid WORKER_COUNT, fallback to %d workers", workerCount))
+	}
+	logPrint("INFO", fmt.Sprintf("Using %d workers.", workerCount))
+
 	jobs := make(chan string, len(dbs))
 	results := make(chan BackupResult, len(dbs))
 
@@ -47,10 +61,10 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for dbName := range jobs {
-				logPrint("INFO", fmt.Sprintf("Starting backup for DB: %s", dbName))
+				logPrint("INFO", fmt.Sprintf("[Worker] Starting backup for DB: %s", dbName))
 
-				// Gọi hàm BackupWithRetry (trả về error + số lần retry thực tế)
-				retries, err := BackupWithRetry(dbName, yesterday)
+				// Retry + backup
+				retries, err := BackupWithRetry(dbName, backupDate)
 				status := "success"
 				if err != nil {
 					status = "failed"
@@ -69,17 +83,17 @@ func main() {
 		}()
 	}
 
-	// Gửi jobs cho worker
+	// Push jobs
 	for _, db := range dbs {
 		jobs <- db
 	}
 	close(jobs)
 
-	// Chờ tất cả worker xong
+	// Wait all workers
 	wg.Wait()
 	close(results)
 
-	// Summarize kết quả
+	// Summary
 	successCount := 0
 	failCount := 0
 	fmt.Println("\nBackup Summary:")

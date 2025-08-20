@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -19,6 +20,7 @@ type Config struct {
 	MaxRetryDays  int
 	BackupTimeout time.Duration
 	KeepRawFiles  bool
+	WorkerCount   int
 }
 
 var AppConfig Config
@@ -29,24 +31,20 @@ func LoadConfig() {
 		logPrint("WARN", "Can't load .env file, using environment variables")
 	}
 
-	// Load retry interval (support both formats)
-	retryInterval := time.Duration(0)
+	// Retry interval (support REATTEMPT_INTERVAL or REATTEMPT_INTERVAL_MIN)
+	retryInterval := 5 * time.Minute // default
 	if v := os.Getenv("RETRY_INTERVAL"); v != "" {
-		retryInterval, err = time.ParseDuration(v)
-		if err != nil {
+		if d, err := time.ParseDuration(v); err == nil {
+			retryInterval = d
+		} else {
 			logPrint("ERROR", fmt.Sprintf("Invalid RETRY_INTERVAL: %v", err))
-			retryInterval = 5 * time.Minute
 		}
 	} else if v := os.Getenv("RETRY_INTERVAL_MIN"); v != "" {
-		min, err := strconv.Atoi(v)
-		if err != nil {
-			logPrint("ERROR", fmt.Sprintf("Invalid RETRY_INTERVAL_MIN: %v", err))
-			retryInterval = 5 * time.Minute
-		} else {
+		if min, err := strconv.Atoi(v); err == nil && min > 0 {
 			retryInterval = time.Duration(min) * time.Minute
+		} else {
+			logPrint("ERROR", fmt.Sprintf("Invalid RETRY_INTERVAL_MIN: %v", err))
 		}
-	} else {
-		retryInterval = 5 * time.Minute
 	}
 
 	// Backup timeout (default 10m)
@@ -61,9 +59,17 @@ func LoadConfig() {
 
 	// Keep raw files (default false)
 	keepRawFiles := false
-	if v := os.Getenv("KEEP_RAW_FILES"); v != "" {
-		if v == "1" || v == "true" || v == "TRUE" {
-			keepRawFiles = true
+	if v := os.Getenv("KEEP_RAW_FILES"); v == "1" || v == "true" || v == "TRUE" {
+		keepRawFiles = true
+	}
+
+	// WorkerCount (default: runtime.NumCPU())
+	workerCount := runtime.NumCPU()
+	if v := os.Getenv("WORKER_COUNT"); v != "" {
+		if val, err := strconv.Atoi(v); err == nil && val > 0 {
+			workerCount = val
+		} else {
+			logPrint("WARN", fmt.Sprintf("Invalid WORKER_COUNT: %s, fallback to %d", v, workerCount))
 		}
 	}
 
@@ -77,6 +83,7 @@ func LoadConfig() {
 		MaxRetryDays:  atoiDefault(os.Getenv("MAX_RETRY_DAYS"), 7),
 		BackupTimeout: backupTimeout,
 		KeepRawFiles:  keepRawFiles,
+		WorkerCount:   workerCount,
 	}
 
 	// Validate config
@@ -89,6 +96,7 @@ func LoadConfig() {
 	if AppConfig.MongodumpPath == "" {
 		AppConfig.MongodumpPath = "mongodump" // fallback to default
 	}
+
 	logPrint("INFO", fmt.Sprintf("Config loaded: %+v", AppConfig))
 }
 
