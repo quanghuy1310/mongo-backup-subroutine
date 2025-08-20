@@ -20,7 +20,7 @@ const maxLogSize = 500 * 1024 * 1024 // 500MB
 
 func InitLogger(logPath string) error {
 	if logPath == "" {
-		logPath = "./backup.log"
+		logPath = "/var/log/mongo_backup.log"
 	}
 	dir := filepath.Dir(logPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
