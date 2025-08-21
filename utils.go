@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -26,22 +27,6 @@ func BackupDir(dbName string, date time.Time) (string, error) {
 	}
 	Info.Printf("Backup directory ready: %s", dir)
 	return dir, nil
-}
-
-func SaveBackupHistory(dbName, collection, bsonFile, metaFile string, fileSize int64, status, compression, msg string) error {
-	coll := mongoClient.Database("admin").Collection("backupHistory")
-	_, err := coll.InsertOne(context.Background(), map[string]interface{}{
-		"database":    dbName,
-		"collection":  collection,
-		"bsonFile":    bsonFile,
-		"metaFile":    metaFile,
-		"fileSize":    fileSize,
-		"status":      status,
-		"compression": compression,
-		"message":     msg,
-		"timestamp":   time.Now(),
-	})
-	return err
 }
 
 // CompressFilesS2 compress multiple files to .s2 format
@@ -100,6 +85,52 @@ func DecompressFileS2(srcPath, dstPath string) error {
 	return nil
 }
 
+// CheckBsonIntegrity validates BSON file using bsondump --quiet
+func CheckBsonIntegrity(bsonPath string) error {
+	if _, err := os.Stat(bsonPath); os.IsNotExist(err) {
+		return fmt.Errorf("bson file does not exist: %s", bsonPath)
+	}
+
+	cmd := exec.Command("bsondump", "--quiet", bsonPath)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("bson integrity check failed: %v", err)
+	}
+	return nil
+}
+
+// CheckMetadataIntegrity validates metadata.json
+func CheckMetadataIntegrity(metaPath string) error {
+	f, err := os.Open(metaPath)
+	if err != nil {
+		return fmt.Errorf("metadata file open failed: %v", err)
+	}
+	defer f.Close()
+
+	var tmp map[string]interface{}
+	decoder := json.NewDecoder(f)
+	if err := decoder.Decode(&tmp); err != nil {
+		return fmt.Errorf("metadata invalid JSON: %v", err)
+	}
+	return nil
+}
+
+// SaveBackupHistory inserts backup record into MongoDB
+func SaveBackupHistory(dbName, collection, bsonFile, metaFile string, fileSize int64, status, compression, msg string) error {
+	coll := mongoClient.Database("admin").Collection("backupHistory")
+	_, err := coll.InsertOne(context.Background(), map[string]interface{}{
+		"database":    dbName,
+		"collection":  collection,
+		"bsonFile":    bsonFile,
+		"metaFile":    metaFile,
+		"fileSize":    fileSize,
+		"status":      status,
+		"compression": compression,
+		"message":     msg,
+		"timestamp":   time.Now(),
+	})
+	return err
+}
+
 // BulkRestore restores multiple .s2 backup files into MongoDB
 func BulkRestore(restoreList []string, dbName, collection string) {
 	for _, s2BsonFile := range restoreList {
@@ -133,7 +164,6 @@ func BulkRestore(restoreList []string, dbName, collection string) {
 		}
 		Info.Printf("Restore successful for %s (BSON + metadata)", restoreFolder)
 
-		// Cleanup raw files
 		if !AppConfig.KeepRawFiles {
 			os.Remove(bsonFile)
 			os.Remove(metaFile)

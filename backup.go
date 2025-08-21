@@ -97,16 +97,25 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 		return result
 	}
 
-	// File paths
-	bsonFile := filepath.Join(dir, result.Collection+".bson")
-	metaFile := filepath.Join(dir, result.Collection+".metadata.json")
+	// Correct mongodump path: nested dbName folder
+	bsonFile := filepath.Join(dir, dbName, result.Collection+".bson")
+	metaFile := filepath.Join(dir, dbName, result.Collection+".metadata.json")
 	s2BsonFile := bsonFile + ".s2"
 	s2MetaFile := metaFile + ".s2"
 
-	if _, err := os.Stat(bsonFile); os.IsNotExist(err) {
-		Info.Printf("Backup skipped: DB=%s Collection=%s Reason=BSON not found", dbName, result.Collection)
-		result.Status = StatusSkipped
-		result.Error = errors.New("skipped")
+	// Check BSON integrity
+	if err := CheckBsonIntegrity(bsonFile); err != nil {
+		Error.Printf("Backup failed: DB=%s Collection=%s Error=BSON integrity check failed %v", dbName, result.Collection, err)
+		SaveBackupStatus(dbName, result.Collection, string(StatusFailed), "BSON integrity failed")
+		result.Error = err
+		return result
+	}
+
+	// Check metadata.json validity
+	if err := CheckMetadataIntegrity(metaFile); err != nil {
+		Error.Printf("Backup failed: DB=%s Collection=%s Error=metadata integrity check failed %v", dbName, result.Collection, err)
+		SaveBackupStatus(dbName, result.Collection, string(StatusFailed), "metadata integrity failed")
+		result.Error = err
 		return result
 	}
 
@@ -140,12 +149,8 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 
 	// Cleanup raw files
 	if !AppConfig.KeepRawFiles {
-		if err := os.Remove(bsonFile); err != nil {
-			Error.Printf("Failed to remove raw BSON: %v", err)
-		}
-		if err := os.Remove(metaFile); err != nil {
-			Error.Printf("Failed to remove raw metadata: %v", err)
-		}
+		os.Remove(bsonFile)
+		os.Remove(metaFile)
 	}
 
 	return result
@@ -172,7 +177,6 @@ func BackupWithRetry(dbName string, date time.Time) (int, error) {
 	return attempt, lastErr
 }
 
-// Simple heuristic: retry only temporary errors
 func isRecoverableError(err error) bool {
 	if err == context.DeadlineExceeded {
 		return true
@@ -200,7 +204,7 @@ func RunFullBackup(backupDate time.Time) {
 		workerCount = 2 * runtime.NumCPU()
 	}
 
-	type BackupResult struct {
+	type backupResult struct {
 		DBName     string
 		Status     string
 		Error      error
@@ -209,12 +213,12 @@ func RunFullBackup(backupDate time.Time) {
 	}
 
 	jobs := make(chan string, len(dbs))
-	results := make(chan BackupResult, len(dbs))
+	results := make(chan backupResult, len(dbs))
 	var wg sync.WaitGroup
 
 	for w := 0; w < workerCount; w++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer wg.Done()
 			for dbName := range jobs {
 				attempts, err := BackupWithRetry(dbName, backupDate)
@@ -223,12 +227,12 @@ func RunFullBackup(backupDate time.Time) {
 				if err != nil {
 					if err.Error() == "skipped" {
 						status = "skipped"
-						skipReason = "collection not found"
+						skipReason = "collection not found or empty"
 					} else {
 						status = "failed"
 					}
 				}
-				results <- BackupResult{
+				results <- backupResult{
 					DBName:     dbName,
 					Status:     status,
 					Error:      err,
@@ -236,7 +240,7 @@ func RunFullBackup(backupDate time.Time) {
 					SkipReason: skipReason,
 				}
 			}
-		}(w + 1)
+		}()
 	}
 
 	for _, db := range dbs {
@@ -258,27 +262,4 @@ func RunFullBackup(backupDate time.Time) {
 			Warn.Printf("[UNKNOWN STATUS] DB=%s: %s", res.DBName, res.Status)
 		}
 	}
-}
-
-// Backup multiple DBs concurrently
-func BackupDatabasesConcurrently(dbs []string, date time.Time) {
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, AppConfig.WorkerCount) // concurrency limit
-
-	for _, db := range dbs {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(dbName string) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			attempts, err := BackupWithRetry(dbName, date)
-			if err != nil {
-				Error.Printf("Backup finished: DB=%s Status=failed Attempts=%d Error=%v", dbName, attempts, err)
-			} else {
-				Info.Printf("Backup finished: DB=%s Status=%s Attempts=%d", dbName, StatusSuccess, attempts)
-			}
-		}(db)
-	}
-
-	wg.Wait()
 }
