@@ -38,5 +38,15 @@ func main() {
 		// Backup hôm qua
 		backupDate := time.Now().AddDate(0, 0, -1)
 		RunFullBackup(backupDate)
+		// Run retention policy after backup
+		retentionDays := AppConfig.RetentionDays
+		backupBasePath := AppConfig.BackupPath
+
+		Info.Printf("Running retention policy: basePath=%s, retentionDays=%d", backupBasePath, retentionDays)
+		if err := DeleteOldBackups(backupBasePath, retentionDays); err != nil {
+			Error.Printf("Retention process failed: %v", err)
+		} else {
+			Info.Println("Retention policy completed successfully.")
+		}
 	}
 }

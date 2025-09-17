@@ -23,6 +23,7 @@ type Config struct {
 	LogFile       string
 	ScheduleHour  int
 	ScheduleMin   int
+	RetentionDays int
 }
 
 var AppConfig Config
@@ -85,6 +86,7 @@ func LoadConfig() {
 		LogFile:       os.Getenv("LOG_FILE"),
 		ScheduleHour:  hour,
 		ScheduleMin:   minute,
+		RetentionDays: atoiDefault(os.Getenv("RETENTION_DAYS"), 30),
 	}
 
 	if AppConfig.MongoURI == "" || AppConfig.BackupPath == "" {

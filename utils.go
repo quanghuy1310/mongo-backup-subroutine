@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/klauspost/compress/s2"
@@ -27,6 +28,65 @@ func BackupDir(dbName string, date time.Time) (string, error) {
 	}
 	Info.Printf("Backup directory ready: %s", dir)
 	return dir, nil
+}
+
+// DeleteOldBackups deletes backup folders older than retentionDays
+func DeleteOldBackups(baseDir string, retentionDays int) error {
+	if retentionDays <= 0 {
+		Info.Printf("RetentionDays <= 0, skip deleting old backups")
+		return nil
+	}
+
+	re := regexp.MustCompile(`^GPS_(\d{4})_(\d{2})_(\d{2})$`)
+	cutoffDate := time.Now().AddDate(0, 0, -retentionDays)
+	Info.Printf("Running retention policy: baseDir=%s retentionDays=%d cutoff=%s",
+		baseDir, retentionDays, cutoffDate.Format("2006-01-02"))
+
+	var deletedCount, keptCount int
+
+	err := filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			Error.Printf("Error reading path=%s err=%v", path, err)
+			return nil // continue walk
+		}
+		if !d.IsDir() {
+			return nil
+		}
+
+		name := d.Name()
+		matches := re.FindStringSubmatch(name)
+		if matches == nil {
+			return nil // skip non-matching folders
+		}
+
+		folderDate, parseErr := time.Parse("2006_01_02", fmt.Sprintf("%s_%s_%s", matches[1], matches[2], matches[3]))
+		if parseErr != nil {
+			Error.Printf("Failed to parse date from folder=%s err=%v", name, parseErr)
+			return nil
+		}
+
+		if folderDate.Before(cutoffDate) {
+			Warn.Printf("Deleting old backup folder: %s (date=%s < cutoff=%s)",
+				path, folderDate.Format("2006-01-02"), cutoffDate.Format("2006-01-02"))
+			if rmErr := os.RemoveAll(path); rmErr != nil {
+				Error.Printf("Failed to delete folder=%s err=%v", path, rmErr)
+			} else {
+				Info.Printf("Deleted folder successfully: %s", path)
+				deletedCount++
+			}
+		} else {
+			Info.Printf("Keeping folder: %s (date=%s)", path, folderDate.Format("2006-01-02"))
+			keptCount++
+		}
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("error walking baseDir=%s: %w", baseDir, err)
+	}
+
+	Info.Printf("Retention finished: deleted=%d kept=%d", deletedCount, keptCount)
+	return nil
 }
 
 // CompressFilesS2 compress multiple files to .s2 format
