@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +29,7 @@ type BackupResult struct {
 	MetaFile   string
 	FileSize   int64
 	Status     BackupStatus
+	SkipReason string
 	Error      error
 }
 
@@ -58,8 +58,11 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 		return result
 	}
 	if done {
-		Info.Printf("Backup skipped: DB=%s Collection=%s Reason=already exists", dbName, result.Collection)
+		reason := "already exists"
+		Info.Printf("Backup skipped: DB=%s Collection=%s Reason=%s", dbName, result.Collection, reason)
 		result.Status = StatusSkipped
+		result.SkipReason = reason
+		result.Error = fmt.Errorf("skipped:%s", reason)
 		return result
 	}
 
@@ -84,11 +87,14 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 
 	if err != nil {
 		outStr := string(output)
-		if strings.Contains(outStr, "ns not found") || strings.Contains(outStr, fmt.Sprintf("collection '%s' does not exist", result.Collection)) {
-			Info.Printf("Backup skipped: DB=%s Collection=%s Reason=collection not found", dbName, result.Collection)
+		if strings.Contains(outStr, "ns not found") ||
+			strings.Contains(outStr, fmt.Sprintf("collection '%s' does not exist", result.Collection)) {
+			reason := "collection not found"
+			Info.Printf("Backup skipped: DB=%s Collection=%s Reason=%s", dbName, result.Collection, reason)
 			result.Status = StatusSkipped
-			SaveBackupStatus(dbName, result.Collection, string(StatusSkipped), "collection not found")
-			result.Error = errors.New("skipped")
+			result.SkipReason = reason
+			SaveBackupStatus(dbName, result.Collection, string(StatusSkipped), reason)
+			result.Error = fmt.Errorf("skipped:%s", reason)
 			return result
 		}
 		Error.Printf("Backup failed: DB=%s Collection=%s Error=%v Output=%s", dbName, result.Collection, err, outStr)
@@ -102,6 +108,17 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	metaFile := filepath.Join(dir, dbName, result.Collection+".metadata.json")
 	s2BsonFile := bsonFile + ".s2"
 	s2MetaFile := metaFile + ".s2"
+
+	// Ensure dump actually produced files
+	if _, err := os.Stat(bsonFile); os.IsNotExist(err) {
+		reason := "no data dumped"
+		Info.Printf("Backup skipped: DB=%s Collection=%s Reason=%s", dbName, result.Collection, reason)
+		result.Status = StatusSkipped
+		result.SkipReason = reason
+		SaveBackupStatus(dbName, result.Collection, string(StatusSkipped), reason)
+		result.Error = fmt.Errorf("skipped:%s", reason)
+		return result
+	}
 
 	// Check BSON integrity
 	if err := CheckBsonIntegrity(bsonFile); err != nil {
@@ -163,8 +180,8 @@ func BackupWithRetry(dbName string, date time.Time) (int, error) {
 	for i := 0; i < AppConfig.MaxRetries; i++ {
 		attempt = i + 1
 		res := BackupDatabase(dbName, date)
-		if res.Error == nil || res.Error.Error() == "skipped" {
-			return attempt, nil
+		if res.Error == nil || strings.HasPrefix(res.Error.Error(), "skipped:") {
+			return attempt, res.Error
 		}
 		if !isRecoverableError(res.Error) {
 			Error.Printf("Backup non-recoverable: DB=%s Collection=%s Error=%v", dbName, res.Collection, res.Error)
@@ -181,7 +198,7 @@ func isRecoverableError(err error) bool {
 	if err == context.DeadlineExceeded {
 		return true
 	}
-	if err != nil && err.Error() == "skipped" {
+	if err != nil && strings.HasPrefix(err.Error(), "skipped:") {
 		return false
 	}
 	return true
@@ -225,9 +242,9 @@ func RunFullBackup(backupDate time.Time) {
 				status := "success"
 				skipReason := ""
 				if err != nil {
-					if err.Error() == "skipped" {
+					if strings.HasPrefix(err.Error(), "skipped:") {
 						status = "skipped"
-						skipReason = "collection not found or empty"
+						skipReason = strings.TrimPrefix(err.Error(), "skipped:")
 					} else {
 						status = "failed"
 					}

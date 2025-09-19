@@ -40,6 +40,7 @@ func InitLogger(logPath string) error {
 	Warn = log.New(mwOut, "[WARN] ", log.LstdFlags)
 	Error = log.New(mwErr, "[ERROR] ", log.LstdFlags)
 
+	// chỉ theo dõi dung lượng
 	go monitorLogFile(logPath)
 	return nil
 }
@@ -48,11 +49,6 @@ func monitorLogFile(basePath string) {
 	for {
 		time.Sleep(1 * time.Minute)
 		if fi, err := os.Stat(basePath); err == nil && fi.Size() >= maxLogSize {
-			rotateLogFile(basePath)
-		}
-		now := time.Now()
-		next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
-		if time.Until(next) < time.Minute {
 			rotateLogFile(basePath)
 		}
 	}

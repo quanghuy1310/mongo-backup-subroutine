@@ -100,6 +100,23 @@ func SaveBackupStatus(dbName, date, status, msg string) error {
 	return err
 }
 
+// SaveBackupHistory inserts backup record into MongoDB
+func SaveBackupHistory(dbName, collection, bsonFile, metaFile string, fileSize int64, status, compression, msg string) error {
+	coll := mongoClient.Database("admin").Collection("backupHistory")
+	_, err := coll.InsertOne(context.Background(), map[string]interface{}{
+		"database":    dbName,
+		"collection":  collection,
+		"bsonFile":    bsonFile,
+		"metaFile":    metaFile,
+		"fileSize":    fileSize,
+		"status":      status,
+		"compression": compression,
+		"message":     msg,
+		"timestamp":   time.Now(),
+	})
+	return err
+}
+
 // IsBackupDone checks if backup for db+date succeeded
 func IsBackupDone(dbName, date string) (bool, error) {
 	if mongoClient == nil {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,8 +38,6 @@ func DeleteOldBackups(baseDir string, retentionDays int) error {
 
 	re := regexp.MustCompile(`^GPS_(\d{4})_(\d{2})_(\d{2})$`)
 	cutoffDate := time.Now().AddDate(0, 0, -retentionDays)
-	Info.Printf("Running retention policy: baseDir=%s retentionDays=%d cutoff=%s",
-		baseDir, retentionDays, cutoffDate.Format("2006-01-02"))
 
 	var deletedCount, keptCount int
 
@@ -73,6 +70,7 @@ func DeleteOldBackups(baseDir string, retentionDays int) error {
 			} else {
 				Info.Printf("Deleted folder successfully: %s", path)
 				deletedCount++
+				return filepath.SkipDir // Skip already deleted folder
 			}
 		} else {
 			Info.Printf("Keeping folder: %s (date=%s)", path, folderDate.Format("2006-01-02"))
@@ -85,7 +83,7 @@ func DeleteOldBackups(baseDir string, retentionDays int) error {
 		return fmt.Errorf("error walking baseDir=%s: %w", baseDir, err)
 	}
 
-	Info.Printf("Retention finished: deleted=%d kept=%d", deletedCount, keptCount)
+	Info.Printf("Retention summary: deleted=%d kept=%d", deletedCount, keptCount)
 	return nil
 }
 
@@ -172,23 +170,6 @@ func CheckMetadataIntegrity(metaPath string) error {
 		return fmt.Errorf("metadata invalid JSON: %v", err)
 	}
 	return nil
-}
-
-// SaveBackupHistory inserts backup record into MongoDB
-func SaveBackupHistory(dbName, collection, bsonFile, metaFile string, fileSize int64, status, compression, msg string) error {
-	coll := mongoClient.Database("admin").Collection("backupHistory")
-	_, err := coll.InsertOne(context.Background(), map[string]interface{}{
-		"database":    dbName,
-		"collection":  collection,
-		"bsonFile":    bsonFile,
-		"metaFile":    metaFile,
-		"fileSize":    fileSize,
-		"status":      status,
-		"compression": compression,
-		"message":     msg,
-		"timestamp":   time.Now(),
-	})
-	return err
 }
 
 // BulkRestore restores multiple .s2 backup files into MongoDB
