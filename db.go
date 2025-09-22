@@ -13,6 +13,28 @@ import (
 
 var mongoClient *mongo.Client
 
+// CHANGED: Định nghĩa struct chuẩn cho backupStatus
+type BackupStatusRecord struct {
+	Database  string    `bson:"database"`
+	Date      string    `bson:"date"`
+	Status    string    `bson:"status"`
+	Message   string    `bson:"message"`
+	Timestamp time.Time `bson:"timestamp"`
+}
+
+// CHANGED: Định nghĩa struct chuẩn cho backupHistory
+type BackupHistoryRecord struct {
+	Database    string    `bson:"database"`
+	Collection  string    `bson:"collection"`
+	BsonFile    string    `bson:"bsonFile"`
+	MetaFile    string    `bson:"metaFile"`
+	FileSize    int64     `bson:"fileSize"`
+	Status      string    `bson:"status"`
+	Compression string    `bson:"compression"`
+	Message     string    `bson:"message"`
+	Timestamp   time.Time `bson:"timestamp"`
+}
+
 // ConnectMongo initializes a new MongoDB client with timeout
 func ConnectMongo(uri string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -77,6 +99,7 @@ func EnsureIndexes() error {
 }
 
 // SaveBackupStatus inserts backup status document
+// CHANGED: dùng struct thay vì map
 func SaveBackupStatus(dbName, date, status, msg string) error {
 	if mongoClient == nil {
 		return fmt.Errorf("mongoClient is nil")
@@ -84,14 +107,16 @@ func SaveBackupStatus(dbName, date, status, msg string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	record := BackupStatusRecord{
+		Database:  dbName,
+		Date:      date,
+		Status:    status,
+		Message:   msg,
+		Timestamp: time.Now(),
+	}
+
 	coll := mongoClient.Database("admin").Collection("backupStatus")
-	_, err := coll.InsertOne(ctx, bson.M{
-		"database":  dbName,
-		"date":      date,
-		"status":    status,
-		"message":   msg,
-		"timestamp": time.Now(),
-	})
+	_, err := coll.InsertOne(ctx, record)
 	if err != nil {
 		Error.Printf("Failed to save backup status for %s (%s): %v", dbName, date, err)
 	} else {
@@ -101,19 +126,24 @@ func SaveBackupStatus(dbName, date, status, msg string) error {
 }
 
 // SaveBackupHistory inserts backup record into MongoDB
+// CHANGED: dùng struct thay vì map
 func SaveBackupHistory(dbName, collection, bsonFile, metaFile string, fileSize int64, status, compression, msg string) error {
+	record := BackupHistoryRecord{
+		Database:    dbName,
+		Collection:  collection,
+		BsonFile:    bsonFile,
+		MetaFile:    metaFile,
+		FileSize:    fileSize,
+		Status:      status,
+		Compression: compression,
+		Message:     msg,
+		Timestamp:   time.Now(),
+	}
 	coll := mongoClient.Database("admin").Collection("backupHistory")
-	_, err := coll.InsertOne(context.Background(), map[string]interface{}{
-		"database":    dbName,
-		"collection":  collection,
-		"bsonFile":    bsonFile,
-		"metaFile":    metaFile,
-		"fileSize":    fileSize,
-		"status":      status,
-		"compression": compression,
-		"message":     msg,
-		"timestamp":   time.Now(),
-	})
+	_, err := coll.InsertOne(context.Background(), record)
+	if err != nil {
+		Error.Printf("Failed to save backup history for %s.%s: %v", dbName, collection, err)
+	}
 	return err
 }
 

@@ -7,22 +7,29 @@ import (
 )
 
 func main() {
-	LoadConfig() // load .env trước
+	LoadConfig() // load .env
 
-	// Khởi tạo logger, fatal nếu fail
+	// Init logger
 	if err := InitLogger(AppConfig.LogFile); err != nil {
 		log.Fatalf("Failed to init logger: %v", err)
 	}
+
+	// If CLI args exist -> run Cobra CLI
+	if len(os.Args) > 1 {
+		Execute()
+		return
+	}
+
+	// Otherwise run as scheduled service
 	Info.Println("Mongo Backup Subroutine v2.2 starting...")
 
-	// Kết nối MongoDB
 	if err := ConnectMongo(AppConfig.MongoURI); err != nil {
 		Error.Printf("Failed to connect MongoDB: %v", err)
 		os.Exit(1)
 	}
 	defer DisconnectMongo()
 
-	// Backup định kỳ hằng ngày vào thời điểm AppConfig.ScheduleHour:ScheduleMin
+	// Scheduled backup loop
 	for {
 		now := time.Now()
 		scheduled := time.Date(now.Year(), now.Month(), now.Day(),
@@ -35,13 +42,13 @@ func main() {
 			scheduled.Format("2006-01-02 15:04:05"), sleepDuration)
 		time.Sleep(sleepDuration)
 
-		// Backup hôm qua
+		// Yesterday backup
 		backupDate := time.Now().AddDate(0, 0, -1)
 		RunFullBackup(backupDate)
-		// Run retention policy after backup
+
+		// Retention
 		retentionDays := AppConfig.RetentionDays
 		backupBasePath := AppConfig.BackupPath
-
 		Info.Printf("Running retention policy: basePath=%s, retentionDays=%d", backupBasePath, retentionDays)
 		if err := DeleteOldBackups(backupBasePath, retentionDays); err != nil {
 			Error.Printf("Retention process failed: %v", err)

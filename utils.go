@@ -73,7 +73,7 @@ func DeleteOldBackups(baseDir string, retentionDays int) error {
 				return filepath.SkipDir // Skip already deleted folder
 			}
 		} else {
-			Info.Printf("Keeping folder: %s (date=%s)", path, folderDate.Format("2006-01-02"))
+			// Info.Printf("Keeping folder: %s (date=%s)", path, folderDate.Format("2006-01-02"))
 			keptCount++
 		}
 		return nil
