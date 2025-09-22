@@ -15,11 +15,11 @@ var mongoClient *mongo.Client
 
 // CHANGED: Định nghĩa struct chuẩn cho backupStatus
 type BackupStatusRecord struct {
-	Database  string    `bson:"database"`
-	Date      string    `bson:"date"`
-	Status    string    `bson:"status"`
-	Message   string    `bson:"message"`
-	Timestamp time.Time `bson:"timestamp"`
+	Database   string    `bson:"database"`
+	Collection string    `bson:"collection"`
+	Status     string    `bson:"status"`
+	Message    string    `bson:"message"`
+	Timestamp  time.Time `bson:"timestamp"`
 }
 
 // CHANGED: Định nghĩa struct chuẩn cho backupHistory
@@ -88,7 +88,7 @@ func EnsureIndexes() error {
 	_, err := coll.Indexes().CreateOne(context.Background(), mongo.IndexModel{
 		Keys: bson.D{
 			{Key: "database", Value: 1},
-			{Key: "date", Value: 1},
+			{Key: "collection", Value: 1},
 			{Key: "status", Value: 1},
 		},
 	})
@@ -100,7 +100,7 @@ func EnsureIndexes() error {
 
 // SaveBackupStatus inserts backup status document
 // CHANGED: dùng struct thay vì map
-func SaveBackupStatus(dbName, date, status, msg string) error {
+func SaveBackupStatus(dbName, collection, status, msg string) error {
 	if mongoClient == nil {
 		return fmt.Errorf("mongoClient is nil")
 	}
@@ -108,19 +108,19 @@ func SaveBackupStatus(dbName, date, status, msg string) error {
 	defer cancel()
 
 	record := BackupStatusRecord{
-		Database:  dbName,
-		Date:      date,
-		Status:    status,
-		Message:   msg,
-		Timestamp: time.Now(),
+		Database:   dbName,
+		Collection: collection,
+		Status:     status,
+		Message:    msg,
+		Timestamp:  time.Now(),
 	}
 
 	coll := mongoClient.Database("admin").Collection("backupStatus")
 	_, err := coll.InsertOne(ctx, record)
 	if err != nil {
-		Error.Printf("Failed to save backup status for %s (%s): %v", dbName, date, err)
+		Error.Printf("Failed to save backup status for %s (%s): %v", dbName, collection, err)
 	} else {
-		Info.Printf("Backup status saved: %s (%s) -> %s", dbName, date, status)
+		Info.Printf("Backup status saved: %s (%s) -> %s", dbName, collection, status)
 	}
 	return err
 }
@@ -148,7 +148,7 @@ func SaveBackupHistory(dbName, collection, bsonFile, metaFile string, fileSize i
 }
 
 // IsBackupDone checks if backup for db+date succeeded
-func IsBackupDone(dbName, date string) (bool, error) {
+func IsBackupDone(dbName, collection string) (bool, error) {
 	if mongoClient == nil {
 		return false, fmt.Errorf("mongoClient is nil")
 	}
@@ -157,12 +157,12 @@ func IsBackupDone(dbName, date string) (bool, error) {
 
 	coll := mongoClient.Database("admin").Collection("backupStatus")
 	count, err := coll.CountDocuments(ctx, bson.M{
-		"database": dbName,
-		"date":     date,
-		"status":   "success",
+		"database":   dbName,
+		"collection": collection,
+		"status":     "success",
 	})
 	if err != nil {
-		Error.Printf("Failed to check backup done for %s (%s): %v", dbName, date, err)
+		Error.Printf("Failed to check backup done for %s (%s): %v", dbName, collection, err)
 	}
 	return count > 0, err
 }
