@@ -28,7 +28,7 @@ type BackupHistoryRecord struct {
 	Collection  string    `bson:"collection"`
 	BsonFile    string    `bson:"bsonFile"`
 	MetaFile    string    `bson:"metaFile"`
-	FileSize    int64     `bson:"fileSize"`
+	FileSizeMB  int64     `bson:"fileSizeMB"`
 	Status      string    `bson:"status"`
 	Compression string    `bson:"compression"`
 	Message     string    `bson:"message"`
@@ -127,13 +127,13 @@ func SaveBackupStatus(dbName, collection, status, msg string) error {
 
 // SaveBackupHistory inserts backup record into MongoDB
 // CHANGED: dùng struct thay vì map
-func SaveBackupHistory(dbName, collection, bsonFile, metaFile string, fileSize int64, status, compression, msg string) error {
+func SaveBackupHistory(dbName, collection, bsonFile, metaFile string, fileSizeMB int64, status, compression, msg string) error {
 	record := BackupHistoryRecord{
 		Database:    dbName,
 		Collection:  collection,
 		BsonFile:    bsonFile,
 		MetaFile:    metaFile,
-		FileSize:    fileSize,
+		FileSizeMB:  fileSizeMB,
 		Status:      status,
 		Compression: compression,
 		Message:     msg,

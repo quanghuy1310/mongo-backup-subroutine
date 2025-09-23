@@ -27,7 +27,7 @@ type BackupResult struct {
 	Collection string
 	BsonFile   string
 	MetaFile   string
-	FileSize   int64
+	FileSizeMB int64
 	Status     BackupStatus
 	SkipReason string
 	Error      error
@@ -149,7 +149,8 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	}
 
 	if info, err := os.Stat(s2BsonFile); err == nil {
-		result.FileSize = info.Size()
+		// CHANGED: convert to MB
+		result.FileSizeMB = info.Size() / (1024 * 1024)
 	}
 	result.BsonFile = s2BsonFile
 	result.MetaFile = s2MetaFile
@@ -157,12 +158,12 @@ func BackupDatabase(dbName string, date time.Time) BackupResult {
 	result.Error = nil
 
 	// Save metadata
-	if metaErr := SaveBackupHistory(dbName, result.Collection, s2BsonFile, s2MetaFile, result.FileSize, string(StatusSuccess), "s2", "OK"); metaErr != nil {
+	if metaErr := SaveBackupHistory(dbName, result.Collection, s2BsonFile, s2MetaFile, result.FileSizeMB, string(StatusSuccess), "s2", "OK"); metaErr != nil {
 		Error.Printf("Failed to save backup metadata: %v", metaErr)
 	}
 
 	SaveBackupStatus(dbName, result.Collection, string(StatusSuccess), "OK")
-	Info.Printf("Backup success: DB=%s Collection=%s File=%s Size=%d", dbName, result.Collection, s2BsonFile, result.FileSize)
+	Info.Printf("Backup success: DB=%s Collection=%s File=%s Size=%d", dbName, result.Collection, s2BsonFile, result.FileSizeMB)
 
 	// Cleanup raw files
 	if !AppConfig.KeepRawFiles {
