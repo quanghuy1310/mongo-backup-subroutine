@@ -3,7 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+
+	//"path/filepath"
 	"strings"
 	"time"
 
@@ -53,10 +54,9 @@ var backupCmd = &cobra.Command{
 		if coll != "" {
 			Info.Printf("Start backup: DB=%s Collection=%s Date=%s", db, coll, backupDate.Format("2006-01-02"))
 
-			result := BackupDatabase(db, backupDate) // <- trả về BackupResult
+			result := BackupDatabase(db, backupDate)
 
 			if result.Error != nil {
-				// Phân biệt lỗi skip hay thực sự failed
 				if strings.HasPrefix(result.Error.Error(), "skipped:") {
 					Warn.Printf("Backup skipped: DB=%s Collection=%s Reason=%s", db, result.Collection, result.SkipReason)
 				} else {
@@ -83,6 +83,7 @@ var restoreCmd = &cobra.Command{
 		file, _ := cmd.Flags().GetString("file")
 		allDBs, _ := cmd.Flags().GetBool("all")
 		sandbox, _ := cmd.Flags().GetBool("sandbox")
+		verify, _ := cmd.Flags().GetBool("verify") // CHANGED
 
 		if allDBs {
 			Info.Println("Restoring all databases ...")
@@ -97,71 +98,43 @@ var restoreCmd = &cobra.Command{
 
 		restoreDB := db
 		if sandbox {
-			restoreDB = db + "_sandbox" // sandbox DB
+			restoreDB = db + "_sandbox"
 			Info.Printf("Restoring into sandbox database: %s", restoreDB)
 		}
 
+		// --- Restore single collection ---
 		if coll != "" {
-			if file == "" {
-				fmt.Println("You must provide --file to restore a collection")
-				os.Exit(1)
-			}
+			var bsonFile, metaFile string
+			var err error
 
-			bsonFile := file[:len(file)-3] // remove .s2
-			metaFile := bsonFile[:len(bsonFile)-5] + ".metadata.json"
-			s2MetaFile := metaFile + ".s2"
-
-			Info.Printf("Start restore: DB=%s Collection=%s File=%s", restoreDB, coll, file)
-			Info.Printf("Decompressing BSON file: %s ...", file)
-			if err := DecompressFileS2(file, bsonFile); err != nil {
-				Error.Printf("Failed to decompress BSON: %v", err)
-				os.Exit(1)
-			}
-			Info.Printf("Decompress BSON completed: %s", bsonFile)
-
-			Info.Printf("Decompressing metadata file: %s ...", s2MetaFile)
-			if err := DecompressFileS2(s2MetaFile, metaFile); err != nil {
-				Warn.Printf("Failed to decompress metadata: %v", err)
+			if file != "" {
+				// user chỉ định file trực tiếp
+				bsonFile = file
+				metaFile = bsonFile[:len(bsonFile)-len(".bson.s2")] + ".metadata.json.s2"
 			} else {
-				Info.Printf("Decompress metadata completed: %s", metaFile)
-			}
-
-			Info.Printf("Restoring collection: %s.%s ...", restoreDB, coll)
-			BulkRestore([]string{file}, restoreDB, coll)
-			Info.Printf("Restore completed: DB=%s Collection=%s", restoreDB, coll)
-
-		} else {
-			if file == "" {
-				fmt.Println("You must provide --file to restore a database")
-				os.Exit(1)
-			}
-
-			Info.Printf("Restoring entire database %s from folder %s ...", restoreDB, file)
-
-			entries, err := os.ReadDir(file)
-			if err != nil {
-				Error.Printf("Failed to read folder: %v", err)
-				os.Exit(1)
-			}
-
-			var files []string
-			for _, e := range entries {
-				if !e.IsDir() && len(e.Name()) > 3 && filepath.Ext(e.Name()) == ".s2" {
-					files = append(files, filepath.Join(file, e.Name()))
+				// tự động tìm trong backup path
+				bsonFile, metaFile, err = FindBackupFiles(db, coll)
+				if err != nil {
+					Error.Printf("Cannot find backup files: %v", err)
+					os.Exit(1)
 				}
 			}
 
-			if len(files) == 0 {
-				Warn.Printf("No .s2 files found in folder %s", file)
-				return
-			}
+			Info.Printf("Restoring collection %s.%s (with metadata) into DB=%s (verify=%v)", db, coll, restoreDB, verify)
 
-			for idx, f := range files {
-				Info.Printf("[%d/%d] Restoring file %s ...", idx+1, len(files), f)
+			if err := RestoreCollectionWithMetadata(bsonFile, metaFile, restoreDB, coll, verify); err != nil {
+				Error.Printf("Restore failed: %v", err)
+				os.Exit(1)
 			}
+			Info.Printf("Restore completed: DB=%s Collection=%s", restoreDB, coll)
+			return
+		}
 
-			BulkRestore(files, restoreDB, "")
-			Info.Printf("Restore completed: DB=%s (all collections)", restoreDB)
+		// --- Restore entire database ---
+		// CHANGED: gọi hàm RestoreDatabase thay vì loop thủ công
+		if err := RestoreDatabase(db, restoreDB, verify); err != nil {
+			Error.Printf("Restore database failed: %v", err)
+			os.Exit(1)
 		}
 	},
 }
@@ -177,9 +150,10 @@ func Execute() {
 	// Restore flags
 	restoreCmd.Flags().String("db", "", "Database name")
 	restoreCmd.Flags().String("collection", "", "Collection name")
-	restoreCmd.Flags().String("file", "", "Path to backup file (.bson.s2)")
+	restoreCmd.Flags().String("file", "", "Optional: Path to backup file or folder (default auto-detect in backup path)")
 	restoreCmd.Flags().Bool("all", false, "Restore all databases")
 	restoreCmd.Flags().Bool("sandbox", false, "Restore into sandbox database (DB_sandbox)")
+	restoreCmd.Flags().Bool("verify", false, "Verify integrity before restore")
 
 	// Add commands to root
 	rootCmd.AddCommand(backupCmd)

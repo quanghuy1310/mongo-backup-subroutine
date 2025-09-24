@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/klauspost/compress/s2"
@@ -172,8 +173,124 @@ func CheckMetadataIntegrity(metaPath string) error {
 	return nil
 }
 
+// FindBackupFiles locates BSON and metadata backup files for a collection
+func FindBackupFiles(dbName, collName string) (string, string, error) {
+	// Folder dạng: <BackupPath>/<db>/<collection>/<db>/
+	collFolder := filepath.Join(AppConfig.BackupPath, dbName, collName, dbName)
+	info, err := os.Stat(collFolder)
+	if err != nil || !info.IsDir() {
+		return "", "", fmt.Errorf("backup folder not found: %s", collFolder)
+	}
+
+	bsonFile := filepath.Join(collFolder, collName+".bson.s2")
+	metaFile := filepath.Join(collFolder, collName+".metadata.json.s2")
+
+	if _, err := os.Stat(bsonFile); err != nil {
+		return "", "", fmt.Errorf("BSON file not found: %s", bsonFile)
+	}
+	if _, err := os.Stat(metaFile); err != nil {
+		return "", "", fmt.Errorf("MetaData file not found: %s", metaFile)
+	}
+
+	return bsonFile, metaFile, nil
+}
+
+// RestoreCollectionWithMetadata restores a single collection with its metadata
+// RestoreCollectionWithMetadata restores a collection from bson.s2 + metadata.json.s2
+// It will decompress directly inside BACKUP_PATH and clean up if keepRawFile=false
+// RestoreCollectionWithMetadata restores a single collection with its metadata
+// CHANGED: added parameter verify bool to optionally check integrity before mongorestore
+func RestoreCollectionWithMetadata(bsonFile, metaFile, db, coll string, verify bool) error {
+	// thư mục chứa file .s2
+	dir := filepath.Dir(bsonFile)
+
+	rawBson := strings.TrimSuffix(bsonFile, ".s2") // -> .bson
+	rawMeta := strings.TrimSuffix(metaFile, ".s2") // -> .metadata.json
+
+	// giải nén
+	if err := DecompressFileS2(bsonFile, rawBson); err != nil {
+		return fmt.Errorf("failed to decompress bson: %w", err)
+	}
+	if err := DecompressFileS2(metaFile, rawMeta); err != nil {
+		return fmt.Errorf("failed to decompress metadata: %w", err)
+	}
+
+	// CHANGED: Optional integrity verification BEFORE mongorestore
+	if verify {
+		if err := CheckBsonIntegrity(rawBson); err != nil {
+			// nếu verify fail -> cleanup raw files (nếu cần) và trả lỗi
+			if !AppConfig.KeepRawFiles {
+				os.Remove(rawBson)
+				os.Remove(rawMeta)
+			}
+			return fmt.Errorf("integrity check failed for BSON: %w", err)
+		}
+		if err := CheckMetadataIntegrity(rawMeta); err != nil {
+			if !AppConfig.KeepRawFiles {
+				os.Remove(rawBson)
+				os.Remove(rawMeta)
+			}
+			return fmt.Errorf("integrity check failed for metadata: %w", err)
+		}
+		Info.Printf("Integrity check passed for %s.%s", db, coll)
+	}
+
+	// chạy mongorestore, trỏ trực tiếp vào folder (đúng cấu trúc mongodump)
+	cmd := exec.Command("mongorestore", "--drop", "--db", db, dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// nếu thất bại, giữ raw file nếu config yêu cầu, trả lỗi kèm output
+		return fmt.Errorf("mongorestore failed: %v\noutput=%s", err, string(out))
+	}
+
+	// nếu config không giữ raw file thì xóa đi
+	if !AppConfig.KeepRawFiles {
+		os.Remove(rawBson)
+		os.Remove(rawMeta)
+	}
+
+	return nil
+}
+
+// RestoreDatabase restores all GPS_* collections from a database folder
+// CHANGED: wrapper to restore multiple collections with sandbox + verify support
+func RestoreDatabase(originalDB, restoreDB string, verify bool) error {
+	dbPath := filepath.Join(AppConfig.BackupPath, originalDB)
+
+	entries, err := os.ReadDir(dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to read folder %s: %w", dbPath, err)
+	}
+
+	var collFolders []string
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), "GPS_") {
+			collFolders = append(collFolders, e.Name())
+		}
+	}
+	if len(collFolders) == 0 {
+		Warn.Printf("No GPS collections found in folder %s", dbPath)
+		return nil
+	}
+
+	for idx, c := range collFolders {
+		bsonFile, metaFile, err := FindBackupFiles(originalDB, c)
+		if err != nil {
+			Error.Printf("Cannot find backup files for %s: %v", c, err)
+			continue
+		}
+		Info.Printf("[%d/%d] Restoring collection %s into DB=%s (verify=%v)...", idx+1, len(collFolders), c, restoreDB, verify)
+		if err := RestoreCollectionWithMetadata(bsonFile, metaFile, restoreDB, c, verify); err != nil {
+			Error.Printf("Restore failed for %s: %v", c, err)
+		}
+	}
+	Info.Printf("Restore completed: DB=%s (all collections)", restoreDB)
+	return nil
+}
+
 // BulkRestore restores multiple .s2 backup files into MongoDB
-func BulkRestore(restoreList []string, dbName, collection string) {
+// CHANGED: added verify flag and support sandbox (dbName can be db_sandbox)
+func BulkRestore(restoreList []string, dbName, collection string, verify bool) {
 	for _, s2BsonFile := range restoreList {
 		bsonFile := s2BsonFile[:len(s2BsonFile)-3]                // remove .s2
 		metaFile := bsonFile[:len(bsonFile)-5] + ".metadata.json" // replace .bson
@@ -188,11 +305,24 @@ func BulkRestore(restoreList []string, dbName, collection string) {
 			Warn.Printf("Failed to decompress metadata: %s -> %s", s2MetaFile, metaFile)
 		}
 
+		// CHANGED: verify integrity if requested
+		if verify {
+			if err := CheckBsonIntegrity(bsonFile); err != nil {
+				Error.Printf("Integrity check failed for BSON %s: %v", bsonFile, err)
+				continue
+			}
+			if err := CheckMetadataIntegrity(metaFile); err != nil {
+				Error.Printf("Integrity check failed for Metadata %s: %v", metaFile, err)
+				continue
+			}
+			Info.Printf("Integrity check passed for %s.%s", dbName, collection)
+		}
+
 		restoreFolder := filepath.Dir(bsonFile)
 		restoreCmdPath := AppConfig.MongodumpPath[:len(AppConfig.MongodumpPath)-4] + "restore"
 		cmd := exec.Command(restoreCmdPath,
 			"--uri", AppConfig.MongoURI,
-			"--db", dbName,
+			"--db", dbName, // dbName có thể là sandbox (db_sandbox)
 			"--collection", collection,
 			"--drop",
 			restoreFolder,
