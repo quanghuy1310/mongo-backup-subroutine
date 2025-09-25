@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -150,12 +148,8 @@ var bulkRestoreCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		var tasks []struct {
-			db       string
-			bsonFile string
-			metaFile string
-		}
-
+		// CHANGED: thay vì tạo workerpool ở CLI, chỉ build restoreList
+		var restoreList []string
 		for _, dbEntry := range dbEntries {
 			if !dbEntry.IsDir() {
 				continue
@@ -164,59 +158,23 @@ var bulkRestoreCmd = &cobra.Command{
 			collFolder := filepath.Join(backupBase, dbName, collection, dbName)
 			if info, err := os.Stat(collFolder); err == nil && info.IsDir() {
 				bsonFile := filepath.Join(collFolder, collection+".bson.s2")
-				metaFile := filepath.Join(collFolder, collection+".metadata.json.s2")
 				if _, err := os.Stat(bsonFile); err == nil {
-					tasks = append(tasks, struct {
-						db       string
-						bsonFile string
-						metaFile string
-					}{dbName, bsonFile, metaFile})
+					restoreList = append(restoreList, bsonFile)
 				}
 			}
 		}
 
-		if len(tasks) == 0 {
+		if len(restoreList) == 0 {
 			Warn.Printf("No databases contain collection %s", collection)
 			return
 		}
 
-		workerCount := AppConfig.WorkerCount
-		if workerCount <= 0 {
-			workerCount = 2 * runtime.NumCPU()
-		}
+		Info.Printf("Starting bulk restore for collection %s across %d databases (verify=%v sandbox=%v)",
+			collection, len(restoreList), verify, sandbox)
 
-		Info.Printf("Starting bulk restore for collection %s across %d databases (verify=%v)", collection, len(tasks), verify)
+		// CHANGED: gọi thẳng utils.BulkRestore (đã có worker pool + verify + cleanup)
+		BulkRestore(restoreList, "", collection, verify)
 
-		taskChan := make(chan struct {
-			db       string
-			bsonFile string
-			metaFile string
-		}, len(tasks))
-		for _, t := range tasks {
-			taskChan <- t
-		}
-		close(taskChan)
-
-		var wg sync.WaitGroup
-		for i := 0; i < workerCount; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for t := range taskChan {
-					restoreDB := t.db
-					if sandbox {
-						restoreDB += "_sandbox"
-					}
-					Info.Printf("Restoring collection %s into DB=%s (verify=%v)", collection, restoreDB, verify)
-					if err := RestoreCollectionWithMetadata(t.bsonFile, t.metaFile, restoreDB, collection, verify); err != nil {
-						Error.Printf("Restore failed for DB=%s Collection=%s: %v", restoreDB, collection, err)
-					} else {
-						Info.Printf("Restore completed for DB=%s Collection=%s", restoreDB, collection)
-					}
-				}
-			}()
-		}
-		wg.Wait()
 		Info.Println("Bulk restore completed")
 	},
 }

@@ -219,8 +219,8 @@ func RunFullBackup(backupDate time.Time) {
 	Info.Printf("Starting backup for %d databases", len(dbs))
 	workerCount := AppConfig.WorkerCount
 	if workerCount <= 0 {
-		workerCount = 2 * runtime.NumCPU()
-		Info.Printf("Worker count not configured, using default: %d workers", workerCount)
+		workerCount = runtime.NumCPU()
+		Info.Printf("Worker count not configured or invalid, using default: %d workers", workerCount)
 	} else {
 		Info.Printf("Configured worker count: %d", workerCount)
 	}

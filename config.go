@@ -58,6 +58,8 @@ func LoadConfig() {
 	if v := os.Getenv("WORKER_COUNT"); v != "" {
 		if val, err := strconv.Atoi(v); err == nil && val > 0 {
 			workerCount = val
+		} else {
+			workerCount = runtime.NumCPU() // default setting
 		}
 	}
 
