@@ -3,9 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
-
-	//"path/filepath"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -53,9 +54,7 @@ var backupCmd = &cobra.Command{
 
 		if coll != "" {
 			Info.Printf("Start backup: DB=%s Collection=%s Date=%s", db, coll, backupDate.Format("2006-01-02"))
-
 			result := BackupDatabase(db, backupDate)
-
 			if result.Error != nil {
 				if strings.HasPrefix(result.Error.Error(), "skipped:") {
 					Warn.Printf("Backup skipped: DB=%s Collection=%s Reason=%s", db, result.Collection, result.SkipReason)
@@ -64,7 +63,6 @@ var backupCmd = &cobra.Command{
 				}
 				return
 			}
-
 			Info.Printf("Backup completed: DB=%s Collection=%s Date=%s", db, result.Collection, backupDate.Format("2006-01-02"))
 		} else {
 			Info.Printf("Backing up entire database %s ...", db)
@@ -83,7 +81,7 @@ var restoreCmd = &cobra.Command{
 		file, _ := cmd.Flags().GetString("file")
 		allDBs, _ := cmd.Flags().GetBool("all")
 		sandbox, _ := cmd.Flags().GetBool("sandbox")
-		verify, _ := cmd.Flags().GetBool("verify") // CHANGED
+		verify, _ := cmd.Flags().GetBool("verify")
 
 		if allDBs {
 			Info.Println("Restoring all databases ...")
@@ -102,26 +100,20 @@ var restoreCmd = &cobra.Command{
 			Info.Printf("Restoring into sandbox database: %s", restoreDB)
 		}
 
-		// --- Restore single collection ---
 		if coll != "" {
 			var bsonFile, metaFile string
 			var err error
-
 			if file != "" {
-				// user chỉ định file trực tiếp
 				bsonFile = file
 				metaFile = bsonFile[:len(bsonFile)-len(".bson.s2")] + ".metadata.json.s2"
 			} else {
-				// tự động tìm trong backup path
 				bsonFile, metaFile, err = FindBackupFiles(db, coll)
 				if err != nil {
 					Error.Printf("Cannot find backup files: %v", err)
 					os.Exit(1)
 				}
 			}
-
 			Info.Printf("Restoring collection %s.%s (with metadata) into DB=%s (verify=%v)", db, coll, restoreDB, verify)
-
 			if err := RestoreCollectionWithMetadata(bsonFile, metaFile, restoreDB, coll, verify); err != nil {
 				Error.Printf("Restore failed: %v", err)
 				os.Exit(1)
@@ -130,12 +122,102 @@ var restoreCmd = &cobra.Command{
 			return
 		}
 
-		// --- Restore entire database ---
-		// CHANGED: gọi hàm RestoreDatabase thay vì loop thủ công
 		if err := RestoreDatabase(db, restoreDB, verify); err != nil {
 			Error.Printf("Restore database failed: %v", err)
 			os.Exit(1)
 		}
+	},
+}
+
+// ------------------ BULK-RESTORE COMMAND ------------------
+var bulkRestoreCmd = &cobra.Command{
+	Use:   "bulk-restore",
+	Short: "Restore a collection across all databases in backup",
+	Run: func(cmd *cobra.Command, args []string) {
+		collection, _ := cmd.Flags().GetString("collection")
+		verify, _ := cmd.Flags().GetBool("verify")
+		sandbox, _ := cmd.Flags().GetBool("sandbox")
+
+		if collection == "" {
+			fmt.Println("You must provide --collection")
+			os.Exit(1)
+		}
+
+		backupBase := AppConfig.BackupPath
+		dbEntries, err := os.ReadDir(backupBase)
+		if err != nil {
+			Error.Printf("Failed to read backup path %s: %v", backupBase, err)
+			os.Exit(1)
+		}
+
+		var tasks []struct {
+			db       string
+			bsonFile string
+			metaFile string
+		}
+
+		for _, dbEntry := range dbEntries {
+			if !dbEntry.IsDir() {
+				continue
+			}
+			dbName := dbEntry.Name()
+			collFolder := filepath.Join(backupBase, dbName, collection, dbName)
+			if info, err := os.Stat(collFolder); err == nil && info.IsDir() {
+				bsonFile := filepath.Join(collFolder, collection+".bson.s2")
+				metaFile := filepath.Join(collFolder, collection+".metadata.json.s2")
+				if _, err := os.Stat(bsonFile); err == nil {
+					tasks = append(tasks, struct {
+						db       string
+						bsonFile string
+						metaFile string
+					}{dbName, bsonFile, metaFile})
+				}
+			}
+		}
+
+		if len(tasks) == 0 {
+			Warn.Printf("No databases contain collection %s", collection)
+			return
+		}
+
+		workerCount := AppConfig.WorkerCount
+		if workerCount <= 0 {
+			workerCount = 2 * runtime.NumCPU()
+		}
+
+		Info.Printf("Starting bulk restore for collection %s across %d databases (verify=%v)", collection, len(tasks), verify)
+
+		taskChan := make(chan struct {
+			db       string
+			bsonFile string
+			metaFile string
+		}, len(tasks))
+		for _, t := range tasks {
+			taskChan <- t
+		}
+		close(taskChan)
+
+		var wg sync.WaitGroup
+		for i := 0; i < workerCount; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for t := range taskChan {
+					restoreDB := t.db
+					if sandbox {
+						restoreDB += "_sandbox"
+					}
+					Info.Printf("Restoring collection %s into DB=%s (verify=%v)", collection, restoreDB, verify)
+					if err := RestoreCollectionWithMetadata(t.bsonFile, t.metaFile, restoreDB, collection, verify); err != nil {
+						Error.Printf("Restore failed for DB=%s Collection=%s: %v", restoreDB, collection, err)
+					} else {
+						Info.Printf("Restore completed for DB=%s Collection=%s", restoreDB, collection)
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		Info.Println("Bulk restore completed")
 	},
 }
 
@@ -155,9 +237,15 @@ func Execute() {
 	restoreCmd.Flags().Bool("sandbox", false, "Restore into sandbox database (DB_sandbox)")
 	restoreCmd.Flags().Bool("verify", false, "Verify integrity before restore")
 
+	// Bulk-restore flags
+	bulkRestoreCmd.Flags().String("collection", "", "Collection name to restore across all databases (required)")
+	bulkRestoreCmd.Flags().Bool("verify", false, "Verify BSON and metadata integrity before restore")
+	bulkRestoreCmd.Flags().Bool("sandbox", false, "Restore into sandbox database (DB_sandbox)")
+
 	// Add commands to root
 	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(restoreCmd)
+	rootCmd.AddCommand(bulkRestoreCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)

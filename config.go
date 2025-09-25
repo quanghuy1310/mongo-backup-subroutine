@@ -4,26 +4,28 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 )
 
 type Config struct {
-	MongoURI      string
-	BackupPath    string
-	MongodumpPath string
-	Compression   string
-	RetryInterval time.Duration
-	MaxRetries    int
-	MaxRetryDays  int
-	BackupTimeout time.Duration
-	KeepRawFiles  bool
-	WorkerCount   int
-	LogFile       string
-	ScheduleHour  int
-	ScheduleMin   int
-	RetentionDays int
+	MongoURI         string
+	BackupPath       string
+	MongodumpPath    string
+	MongorestorePath string
+	Compression      string
+	RetryInterval    time.Duration
+	MaxRetries       int
+	MaxRetryDays     int
+	BackupTimeout    time.Duration
+	KeepRawFiles     bool
+	WorkerCount      int
+	LogFile          string
+	ScheduleHour     int
+	ScheduleMin      int
+	RetentionDays    int
 }
 
 var AppConfig Config
@@ -73,24 +75,39 @@ func LoadConfig() {
 	}
 
 	AppConfig = Config{
-		MongoURI:      os.Getenv("MONGO_URI"),
-		BackupPath:    os.Getenv("BACKUP_PATH"),
-		MongodumpPath: os.Getenv("MONGODUMP_PATH"),
-		Compression:   os.Getenv("COMPRESSION"),
-		RetryInterval: retryInterval,
-		MaxRetries:    atoiDefault(os.Getenv("MAX_RETRIES"), 5),
-		MaxRetryDays:  atoiDefault(os.Getenv("MAX_RETRY_DAYS"), 7),
-		BackupTimeout: backupTimeout,
-		KeepRawFiles:  keepRawFiles,
-		WorkerCount:   workerCount,
-		LogFile:       os.Getenv("LOG_FILE"),
-		ScheduleHour:  hour,
-		ScheduleMin:   minute,
-		RetentionDays: atoiDefault(os.Getenv("RETENTION_DAYS"), 30),
+		MongoURI:         os.Getenv("MONGO_URI"),
+		BackupPath:       os.Getenv("BACKUP_PATH"),
+		MongodumpPath:    os.Getenv("MONGODUMP_PATH"),
+		MongorestorePath: os.Getenv("MONGORESTORE_PATH"),
+		Compression:      os.Getenv("COMPRESSION"),
+		RetryInterval:    retryInterval,
+		MaxRetries:       atoiDefault(os.Getenv("MAX_RETRIES"), 5),
+		MaxRetryDays:     atoiDefault(os.Getenv("MAX_RETRY_DAYS"), 7),
+		BackupTimeout:    backupTimeout,
+		KeepRawFiles:     keepRawFiles,
+		WorkerCount:      workerCount,
+		LogFile:          os.Getenv("LOG_FILE"),
+		ScheduleHour:     hour,
+		ScheduleMin:      minute,
+		RetentionDays:    atoiDefault(os.Getenv("RETENTION_DAYS"), 30),
 	}
 
-	if AppConfig.MongoURI == "" || AppConfig.BackupPath == "" {
-		Error.Println("MONGO_URI and BACKUP_PATH are required")
+	missing := []string{}
+	if AppConfig.MongoURI == "" {
+		missing = append(missing, "MONGO_URI")
+	}
+	if AppConfig.BackupPath == "" {
+		missing = append(missing, "BACKUP_PATH")
+	}
+	if AppConfig.MongodumpPath == "" {
+		missing = append(missing, "MONGODUMP_PATH")
+	}
+	if AppConfig.MongorestorePath == "" {
+		missing = append(missing, "MONGORESTORE_PATH")
+	}
+
+	if len(missing) > 0 {
+		Error.Printf("Missing required environment variables: %s", strings.Join(missing, ", "))
 		os.Exit(1)
 	}
 }

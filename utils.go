@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/s2"
@@ -45,7 +47,7 @@ func DeleteOldBackups(baseDir string, retentionDays int) error {
 	err := filepath.WalkDir(baseDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			Error.Printf("Error reading path=%s err=%v", path, err)
-			return nil // continue walk
+			return nil
 		}
 		if !d.IsDir() {
 			return nil
@@ -54,7 +56,7 @@ func DeleteOldBackups(baseDir string, retentionDays int) error {
 		name := d.Name()
 		matches := re.FindStringSubmatch(name)
 		if matches == nil {
-			return nil // skip non-matching folders
+			return nil
 		}
 
 		folderDate, parseErr := time.Parse("2006_01_02", fmt.Sprintf("%s_%s_%s", matches[1], matches[2], matches[3]))
@@ -71,10 +73,9 @@ func DeleteOldBackups(baseDir string, retentionDays int) error {
 			} else {
 				Info.Printf("Deleted folder successfully: %s", path)
 				deletedCount++
-				return filepath.SkipDir // Skip already deleted folder
+				return filepath.SkipDir
 			}
 		} else {
-			// Info.Printf("Keeping folder: %s (date=%s)", path, folderDate.Format("2006-01-02"))
 			keptCount++
 		}
 		return nil
@@ -88,37 +89,74 @@ func DeleteOldBackups(baseDir string, retentionDays int) error {
 	return nil
 }
 
-// CompressFilesS2 compress multiple files to .s2 format
+// CHANGED / OPTIMIZED: CompressFilesS2 uses worker pool for parallel compress
 func CompressFilesS2(files map[string]string) error {
+	type task struct{ src, dst string }
+	tasks := make(chan task, len(files))
 	for src, dst := range files {
-		in, err := os.Open(src)
-		if err != nil {
-			return fmt.Errorf("failed to open %s: %w", src, err)
-		}
-		out, err := os.Create(dst)
-		if err != nil {
-			in.Close()
-			return fmt.Errorf("failed to create %s: %w", dst, err)
-		}
-
-		writer := s2.NewWriter(out)
-		buf := make([]byte, 1<<20)
-		if _, err := io.CopyBuffer(writer, in, buf); err != nil {
-			writer.Close()
-			in.Close()
-			out.Close()
-			return fmt.Errorf("failed to compress %s: %w", src, err)
-		}
-
-		writer.Close()
-		in.Close()
-		out.Close()
-		Info.Printf("Compressed %s -> %s", src, dst)
+		tasks <- task{src, dst}
 	}
-	return nil
+	close(tasks)
+
+	workerCount := AppConfig.WorkerCount
+	if workerCount <= 0 {
+		workerCount = 2 * runtime.NumCPU()
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 8<<20) // 8MB buffer
+			for t := range tasks {
+				in, err := os.Open(t.src)
+				if err != nil {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("failed to open %s: %w", t.src, err)
+					}
+					mu.Unlock()
+					continue
+				}
+				out, err := os.Create(t.dst)
+				if err != nil {
+					in.Close()
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("failed to create %s: %w", t.dst, err)
+					}
+					mu.Unlock()
+					continue
+				}
+				writer := s2.NewWriter(out)
+				if _, err := io.CopyBuffer(writer, in, buf); err != nil {
+					writer.Close()
+					in.Close()
+					out.Close()
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("failed to compress %s: %w", t.src, err)
+					}
+					mu.Unlock()
+					continue
+				}
+				writer.Close()
+				in.Close()
+				out.Close()
+				Info.Printf("Compressed %s -> %s", t.src, t.dst)
+			}
+		}()
+	}
+
+	wg.Wait()
+	return firstErr
 }
 
-// DecompressFileS2 decompress a .s2 file
+// CHANGED / OPTIMIZED: DecompressFileS2 using larger buffer
 func DecompressFileS2(srcPath, dstPath string) error {
 	in, err := os.Open(srcPath)
 	if err != nil {
@@ -134,8 +172,9 @@ func DecompressFileS2(srcPath, dstPath string) error {
 	}
 	defer out.Close()
 
+	buf := make([]byte, 8<<20) // 8MB buffer
 	reader := s2.NewReader(in)
-	if _, err := io.Copy(out, reader); err != nil {
+	if _, err := io.CopyBuffer(out, reader, buf); err != nil {
 		Error.Printf("Failed to decompress %s -> %s: %v", srcPath, dstPath, err)
 		return err
 	}
@@ -149,7 +188,6 @@ func CheckBsonIntegrity(bsonPath string) error {
 	if _, err := os.Stat(bsonPath); os.IsNotExist(err) {
 		return fmt.Errorf("bson file does not exist: %s", bsonPath)
 	}
-
 	cmd := exec.Command("bsondump", "--quiet", bsonPath)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("bson integrity check failed: %v", err)
@@ -164,7 +202,6 @@ func CheckMetadataIntegrity(metaPath string) error {
 		return fmt.Errorf("metadata file open failed: %v", err)
 	}
 	defer f.Close()
-
 	var tmp map[string]interface{}
 	decoder := json.NewDecoder(f)
 	if err := decoder.Decode(&tmp); err != nil {
@@ -175,7 +212,6 @@ func CheckMetadataIntegrity(metaPath string) error {
 
 // FindBackupFiles locates BSON and metadata backup files for a collection
 func FindBackupFiles(dbName, collName string) (string, string, error) {
-	// Folder dạng: <BackupPath>/<db>/<collection>/<db>/
 	collFolder := filepath.Join(AppConfig.BackupPath, dbName, collName, dbName)
 	info, err := os.Stat(collFolder)
 	if err != nil || !info.IsDir() {
@@ -191,23 +227,16 @@ func FindBackupFiles(dbName, collName string) (string, string, error) {
 	if _, err := os.Stat(metaFile); err != nil {
 		return "", "", fmt.Errorf("MetaData file not found: %s", metaFile)
 	}
-
 	return bsonFile, metaFile, nil
 }
 
-// RestoreCollectionWithMetadata restores a single collection with its metadata
-// RestoreCollectionWithMetadata restores a collection from bson.s2 + metadata.json.s2
-// It will decompress directly inside BACKUP_PATH and clean up if keepRawFile=false
-// RestoreCollectionWithMetadata restores a single collection with its metadata
-// CHANGED: added parameter verify bool to optionally check integrity before mongorestore
+// CHANGED / OPTIMIZED: RestoreCollectionWithMetadata uses AppConfig.MongorestorePath, verify optional, cleanup
 func RestoreCollectionWithMetadata(bsonFile, metaFile, db, coll string, verify bool) error {
-	// thư mục chứa file .s2
 	dir := filepath.Dir(bsonFile)
 
-	rawBson := strings.TrimSuffix(bsonFile, ".s2") // -> .bson
-	rawMeta := strings.TrimSuffix(metaFile, ".s2") // -> .metadata.json
+	rawBson := strings.TrimSuffix(bsonFile, ".s2")
+	rawMeta := strings.TrimSuffix(metaFile, ".s2")
 
-	// giải nén
 	if err := DecompressFileS2(bsonFile, rawBson); err != nil {
 		return fmt.Errorf("failed to decompress bson: %w", err)
 	}
@@ -215,10 +244,9 @@ func RestoreCollectionWithMetadata(bsonFile, metaFile, db, coll string, verify b
 		return fmt.Errorf("failed to decompress metadata: %w", err)
 	}
 
-	// CHANGED: Optional integrity verification BEFORE mongorestore
 	if verify {
+		Info.Printf("Verifying integrity for %s.%s ...", db, coll)
 		if err := CheckBsonIntegrity(rawBson); err != nil {
-			// nếu verify fail -> cleanup raw files (nếu cần) và trả lỗi
 			if !AppConfig.KeepRawFiles {
 				os.Remove(rawBson)
 				os.Remove(rawMeta)
@@ -235,25 +263,38 @@ func RestoreCollectionWithMetadata(bsonFile, metaFile, db, coll string, verify b
 		Info.Printf("Integrity check passed for %s.%s", db, coll)
 	}
 
-	// chạy mongorestore, trỏ trực tiếp vào folder (đúng cấu trúc mongodump)
-	cmd := exec.Command("mongorestore", "--drop", "--db", db, dir)
+	restoreCmdPath := AppConfig.MongorestorePath
+	if restoreCmdPath == "" {
+		restoreCmdPath = "mongorestore"
+	}
+	Info.Printf("Running mongorestore for %s.%s into DB=%s ...", db, coll, db)
+	cmd := exec.Command(restoreCmdPath,
+		"--uri", AppConfig.MongoURI,
+		"--drop",
+		"--db", db,
+		dir,
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// nếu thất bại, giữ raw file nếu config yêu cầu, trả lỗi kèm output
-		return fmt.Errorf("mongorestore failed: %v\noutput=%s", err, string(out))
+		if !AppConfig.KeepRawFiles {
+			os.Remove(rawBson)
+			os.Remove(rawMeta)
+		}
+		return fmt.Errorf("mongorestore failed for %s.%s: %v\noutput=%s",
+			db, coll, err, string(out))
 	}
 
-	// nếu config không giữ raw file thì xóa đi
+	Info.Printf("Restore completed for %s.%s", db, coll)
+
 	if !AppConfig.KeepRawFiles {
 		os.Remove(rawBson)
 		os.Remove(rawMeta)
+		Info.Printf("Cleaned up raw files for %s.%s", db, coll)
 	}
-
 	return nil
 }
 
-// RestoreDatabase restores all GPS_* collections from a database folder
-// CHANGED: wrapper to restore multiple collections with sandbox + verify support
+// CHANGED / OPTIMIZED: RestoreDatabase uses worker pool for parallel restore
 func RestoreDatabase(originalDB, restoreDB string, verify bool) error {
 	dbPath := filepath.Join(AppConfig.BackupPath, originalDB)
 
@@ -273,72 +314,112 @@ func RestoreDatabase(originalDB, restoreDB string, verify bool) error {
 		return nil
 	}
 
-	for idx, c := range collFolders {
-		bsonFile, metaFile, err := FindBackupFiles(originalDB, c)
-		if err != nil {
-			Error.Printf("Cannot find backup files for %s: %v", c, err)
-			continue
-		}
-		Info.Printf("[%d/%d] Restoring collection %s into DB=%s (verify=%v)...", idx+1, len(collFolders), c, restoreDB, verify)
-		if err := RestoreCollectionWithMetadata(bsonFile, metaFile, restoreDB, c, verify); err != nil {
-			Error.Printf("Restore failed for %s: %v", c, err)
-		}
+	workerCount := AppConfig.WorkerCount
+	if workerCount <= 0 {
+		workerCount = 2 * runtime.NumCPU()
 	}
+
+	tasks := make(chan string, len(collFolders))
+	for _, c := range collFolders {
+		tasks <- c
+	}
+	close(tasks)
+
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for c := range tasks {
+				bsonFile, metaFile, err := FindBackupFiles(originalDB, c)
+				if err != nil {
+					Error.Printf("Cannot find backup files for %s: %v", c, err)
+					continue
+				}
+				Info.Printf("Restoring collection %s into DB=%s (verify=%v)...", c, restoreDB, verify)
+				if err := RestoreCollectionWithMetadata(bsonFile, metaFile, restoreDB, c, verify); err != nil {
+					Error.Printf("Restore failed for %s: %v", c, err)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
 	Info.Printf("Restore completed: DB=%s (all collections)", restoreDB)
 	return nil
 }
 
-// BulkRestore restores multiple .s2 backup files into MongoDB
-// CHANGED: added verify flag and support sandbox (dbName can be db_sandbox)
+// CHANGED / OPTIMIZED: BulkRestore uses worker pool + verify + cleanup
 func BulkRestore(restoreList []string, dbName, collection string, verify bool) {
-	for _, s2BsonFile := range restoreList {
-		bsonFile := s2BsonFile[:len(s2BsonFile)-3]                // remove .s2
-		metaFile := bsonFile[:len(bsonFile)-5] + ".metadata.json" // replace .bson
-		s2MetaFile := metaFile + ".s2"
-
-		// Decompress
-		if err := DecompressFileS2(s2BsonFile, bsonFile); err != nil {
-			Error.Printf("Failed to decompress BSON: %s -> %s", s2BsonFile, bsonFile)
-			continue
-		}
-		if err := DecompressFileS2(s2MetaFile, metaFile); err != nil {
-			Warn.Printf("Failed to decompress metadata: %s -> %s", s2MetaFile, metaFile)
-		}
-
-		// CHANGED: verify integrity if requested
-		if verify {
-			if err := CheckBsonIntegrity(bsonFile); err != nil {
-				Error.Printf("Integrity check failed for BSON %s: %v", bsonFile, err)
-				continue
-			}
-			if err := CheckMetadataIntegrity(metaFile); err != nil {
-				Error.Printf("Integrity check failed for Metadata %s: %v", metaFile, err)
-				continue
-			}
-			Info.Printf("Integrity check passed for %s.%s", dbName, collection)
-		}
-
-		restoreFolder := filepath.Dir(bsonFile)
-		restoreCmdPath := AppConfig.MongodumpPath[:len(AppConfig.MongodumpPath)-4] + "restore"
-		cmd := exec.Command(restoreCmdPath,
-			"--uri", AppConfig.MongoURI,
-			"--db", dbName, // dbName có thể là sandbox (db_sandbox)
-			"--collection", collection,
-			"--drop",
-			restoreFolder,
-		)
-
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			Error.Printf("mongorestore failed for %s: %v\nOutput: %s", restoreFolder, err, string(output))
-			continue
-		}
-		Info.Printf("Restore successful for %s (BSON + metadata)", restoreFolder)
-
-		if !AppConfig.KeepRawFiles {
-			os.Remove(bsonFile)
-			os.Remove(metaFile)
-			Info.Printf("Cleaned up raw files for %s", restoreFolder)
-		}
+	workerCount := AppConfig.WorkerCount
+	if workerCount <= 0 {
+		workerCount = 2 * runtime.NumCPU()
 	}
+
+	tasks := make(chan string, len(restoreList))
+	for _, s2BsonFile := range restoreList {
+		tasks <- s2BsonFile
+	}
+	close(tasks)
+
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for s2BsonFile := range tasks {
+				bsonFile := strings.TrimSuffix(s2BsonFile, ".s2")
+				metaFile := strings.TrimSuffix(bsonFile, ".bson") + ".metadata.json"
+				s2MetaFile := metaFile + ".s2"
+
+				if err := DecompressFileS2(s2BsonFile, bsonFile); err != nil {
+					Error.Printf("Failed to decompress BSON: %s -> %s", s2BsonFile, bsonFile)
+					continue
+				}
+				if err := DecompressFileS2(s2MetaFile, metaFile); err != nil {
+					Warn.Printf("Failed to decompress metadata: %s -> %s", s2MetaFile, metaFile)
+				}
+
+				if verify {
+					if err := CheckBsonIntegrity(bsonFile); err != nil {
+						Error.Printf("Integrity check failed for BSON %s: %v", bsonFile, err)
+						continue
+					}
+					if err := CheckMetadataIntegrity(metaFile); err != nil {
+						Error.Printf("Integrity check failed for Metadata %s: %v", metaFile, err)
+						continue
+					}
+					Info.Printf("Integrity check passed for %s.%s", dbName, collection)
+				}
+
+				restoreFolder := filepath.Dir(bsonFile)
+				restoreCmdPath := AppConfig.MongorestorePath
+				if restoreCmdPath == "" {
+					restoreCmdPath = "mongorestore"
+				}
+				cmd := exec.Command(restoreCmdPath,
+					"--uri", AppConfig.MongoURI,
+					"--db", dbName,
+					"--collection", collection,
+					"--drop",
+					restoreFolder,
+				)
+
+				output, err := cmd.CombinedOutput()
+				if err != nil {
+					Error.Printf("mongorestore failed for %s: %v\nOutput: %s", restoreFolder, err, string(output))
+					continue
+				}
+				Info.Printf("Restore successful for %s (BSON + metadata)", restoreFolder)
+
+				if !AppConfig.KeepRawFiles {
+					os.Remove(bsonFile)
+					os.Remove(metaFile)
+					Info.Printf("Cleaned up raw files for %s", restoreFolder)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
 }
