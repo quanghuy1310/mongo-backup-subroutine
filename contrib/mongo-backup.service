@@ -1,0 +1,17 @@
+[Unit]
+Description=Mongo Backup Subroutine
+After=network.target
+
+[Service]
+Type=simple
+User=backup
+WorkingDirectory=/opt/mongo-backup-subroutine
+ExecStart=/opt/mongo-backup-subroutine/mongo_backup
+Restart=on-failure
+RestartSec=10
+StandardOutput=syslog
+StandardError=syslog
+EnvironmentFile=/etc/mongo-backup.env
+
+[Install]
+WantedBy=multi-user.target

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	// bson is not needed in this file
 )
 
 // BackupStatus defines enum for backup result
@@ -225,24 +226,38 @@ func RunFullBackup(backupDate time.Time) {
 		Info.Printf("Configured worker count: %d", workerCount)
 	}
 
+	type backupJob struct {
+		DBName string
+		Date   time.Time
+	}
+
 	type backupResult struct {
 		DBName     string
+		Date       time.Time
 		Status     string
 		Error      error
 		Retries    int
 		SkipReason string
 	}
 
-	jobs := make(chan string, len(dbs))
-	results := make(chan backupResult, len(dbs))
+	// total jobs = len(dbs) * BackupDaysInterval
+	totalJobs := len(dbs) * AppConfig.BackupDaysInterval
+	jobs := make(chan backupJob, totalJobs)
+	results := make(chan backupResult, totalJobs)
 	var wg sync.WaitGroup
 
 	for w := 0; w < workerCount; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for dbName := range jobs {
-				attempts, err := BackupWithRetry(dbName, backupDate)
+			// Protect goroutine from panics to avoid crashing worker pool
+			defer func() {
+				if r := recover(); r != nil {
+					Error.Printf("panic in backup worker: %v", r)
+				}
+			}()
+			for job := range jobs {
+				attempts, err := BackupWithRetry(job.DBName, job.Date)
 				status := "success"
 				skipReason := ""
 				if err != nil {
@@ -254,7 +269,105 @@ func RunFullBackup(backupDate time.Time) {
 					}
 				}
 				results <- backupResult{
-					DBName:     dbName,
+					DBName:     job.DBName,
+					Date:       job.Date,
+					Status:     status,
+					Error:      err,
+					Retries:    attempts,
+					SkipReason: skipReason,
+				}
+			}
+		}()
+	}
+
+	// enqueue jobs for the last N days (including backupDate)
+	for dayOffset := 0; dayOffset < AppConfig.BackupDaysInterval; dayOffset++ {
+		d := backupDate.AddDate(0, 0, -dayOffset)
+		for _, db := range dbs {
+			jobs <- backupJob{DBName: db, Date: d}
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	for res := range results {
+		switch res.Status {
+		case "success":
+			Info.Printf("[SUCCESS] DB=%s Date=%s (retries=%d)", res.DBName, FormatDate(res.Date), res.Retries)
+		case "skipped":
+			Warn.Printf("[SKIPPED] DB=%s Date=%s (%s)", res.DBName, FormatDate(res.Date), res.SkipReason)
+		case "failed":
+			Error.Printf("[FAILED] DB=%s Date=%s (retries=%d, error=%v)", res.DBName, FormatDate(res.Date), res.Retries, res.Error)
+		default:
+			Warn.Printf("[UNKNOWN STATUS] DB=%s Date=%s: %s", res.DBName, FormatDate(res.Date), res.Status)
+		}
+	}
+}
+
+// RunFullBackupSingleDay runs backups for all provider DBs for a single date.
+// This is used by CLI --all to keep CLI behavior predictable.
+func RunFullBackupSingleDay(backupDate time.Time) {
+	dbs, err := ListProviderDatabases()
+	if err != nil {
+		Error.Printf("Failed to list databases: %v", err)
+		return
+	}
+	if len(dbs) == 0 {
+		Info.Println("No databases found for backup.")
+		return
+	}
+
+	Info.Printf("Starting single-day backup for %d databases (date=%s)", len(dbs), FormatDate(backupDate))
+	workerCount := AppConfig.WorkerCount
+	if workerCount <= 0 {
+		workerCount = runtime.NumCPU()
+		Info.Printf("Worker count not configured or invalid, using default: %d workers", workerCount)
+	}
+
+	type backupJob struct {
+		DBName string
+		Date   time.Time
+	}
+
+	type backupResult struct {
+		DBName     string
+		Date       time.Time
+		Status     string
+		Error      error
+		Retries    int
+		SkipReason string
+	}
+
+	totalJobs := len(dbs)
+	jobs := make(chan backupJob, totalJobs)
+	results := make(chan backupResult, totalJobs)
+	var wg sync.WaitGroup
+
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					Error.Printf("panic in backup worker: %v", r)
+				}
+			}()
+			for job := range jobs {
+				attempts, err := BackupWithRetry(job.DBName, job.Date)
+				status := "success"
+				skipReason := ""
+				if err != nil {
+					if strings.HasPrefix(err.Error(), "skipped:") {
+						status = "skipped"
+						skipReason = strings.TrimPrefix(err.Error(), "skipped:")
+					} else {
+						status = "failed"
+					}
+				}
+				results <- backupResult{
+					DBName:     job.DBName,
+					Date:       job.Date,
 					Status:     status,
 					Error:      err,
 					Retries:    attempts,
@@ -265,7 +378,7 @@ func RunFullBackup(backupDate time.Time) {
 	}
 
 	for _, db := range dbs {
-		jobs <- db
+		jobs <- backupJob{DBName: db, Date: backupDate}
 	}
 	close(jobs)
 	wg.Wait()
@@ -274,13 +387,13 @@ func RunFullBackup(backupDate time.Time) {
 	for res := range results {
 		switch res.Status {
 		case "success":
-			Info.Printf("[SUCCESS] DB=%s (retries=%d)", res.DBName, res.Retries)
+			Info.Printf("[SUCCESS] DB=%s Date=%s (retries=%d)", res.DBName, FormatDate(res.Date), res.Retries)
 		case "skipped":
-			Warn.Printf("[SKIPPED] DB=%s (%s)", res.DBName, res.SkipReason)
+			Warn.Printf("[SKIPPED] DB=%s Date=%s (%s)", res.DBName, FormatDate(res.Date), res.SkipReason)
 		case "failed":
-			Error.Printf("[FAILED] DB=%s (retries=%d, error=%v)", res.DBName, res.Retries, res.Error)
+			Error.Printf("[FAILED] DB=%s Date=%s (retries=%d, error=%v)", res.DBName, FormatDate(res.Date), res.Retries, res.Error)
 		default:
-			Warn.Printf("[UNKNOWN STATUS] DB=%s: %s", res.DBName, res.Status)
+			Warn.Printf("[UNKNOWN STATUS] DB=%s Date=%s: %s", res.DBName, FormatDate(res.Date), res.Status)
 		}
 	}
 }

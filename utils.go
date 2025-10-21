@@ -16,6 +16,13 @@ import (
 	"github.com/klauspost/compress/s2"
 )
 
+// bufferPool reduces GC pressure from large temporary buffers used in compression
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 8<<20) // 8MB
+	},
+}
+
 // FormatDate returns YYYY_MM_DD
 func FormatDate(t time.Time) string {
 	return t.Format("2006_01_02")
@@ -99,6 +106,13 @@ func CompressFilesS2(files map[string]string) error {
 	close(tasks)
 
 	workerCount := AppConfig.WorkerCount
+	if workerCount <= 0 {
+		workerCount = 2
+	}
+	// cap workers to avoid excessive parallel IO leading to OOM
+	if workerCount > 16 {
+		workerCount = 16
+	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -108,7 +122,18 @@ func CompressFilesS2(files map[string]string) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			buf := make([]byte, 8<<20) // 8MB buffer
+			defer func() {
+				if r := recover(); r != nil {
+					Error.Printf("panic in compress worker: %v", r)
+				}
+			}()
+			raw := bufferPool.Get()
+			buf, ok := raw.([]byte)
+			if !ok || buf == nil {
+				// fallback to fresh buffer
+				buf = make([]byte, 8<<20)
+			}
+			defer bufferPool.Put(buf)
 			for t := range tasks {
 				in, err := os.Open(t.src)
 				if err != nil {
@@ -131,7 +156,9 @@ func CompressFilesS2(files map[string]string) error {
 				}
 				writer := s2.NewWriter(out)
 				if _, err := io.CopyBuffer(writer, in, buf); err != nil {
-					writer.Close()
+					if cerr := writer.Close(); cerr != nil {
+						Error.Printf("failed to close writer after copy error: %v", cerr)
+					}
 					in.Close()
 					out.Close()
 					mu.Lock()
@@ -141,7 +168,9 @@ func CompressFilesS2(files map[string]string) error {
 					mu.Unlock()
 					continue
 				}
-				writer.Close()
+				if cerr := writer.Close(); cerr != nil {
+					Error.Printf("compression writer close error for %s: %v", t.src, cerr)
+				}
 				in.Close()
 				out.Close()
 				Info.Printf("Compressed %s -> %s", t.src, t.dst)
@@ -169,7 +198,8 @@ func DecompressFileS2(srcPath, dstPath string) error {
 	}
 	defer out.Close()
 
-	buf := make([]byte, 8<<20) // 8MB buffer
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
 	reader := s2.NewReader(in)
 	if _, err := io.CopyBuffer(out, reader, buf); err != nil {
 		Error.Printf("Failed to decompress %s -> %s: %v", srcPath, dstPath, err)
@@ -245,8 +275,12 @@ func RestoreCollectionWithMetadata(bsonFile, metaFile, db, coll string, verify b
 		Info.Printf("Verifying integrity for %s.%s ...", db, coll)
 		if err := CheckBsonIntegrity(rawBson); err != nil {
 			if !AppConfig.KeepRawFiles {
-				os.Remove(rawBson)
-				os.Remove(rawMeta)
+				if rerr := os.Remove(rawBson); rerr != nil {
+					Warn.Printf("failed to remove raw bson after integrity fail: %v", rerr)
+				}
+				if rerr := os.Remove(rawMeta); rerr != nil {
+					Warn.Printf("failed to remove raw meta after integrity fail: %v", rerr)
+				}
 			}
 			return fmt.Errorf("integrity check failed for BSON: %w", err)
 		}
@@ -275,8 +309,12 @@ func RestoreCollectionWithMetadata(bsonFile, metaFile, db, coll string, verify b
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if !AppConfig.KeepRawFiles {
-			os.Remove(rawBson)
-			os.Remove(rawMeta)
+			if rerr := os.Remove(rawBson); rerr != nil {
+				Warn.Printf("failed to remove raw bson after mongorestore failure: %v", rerr)
+			}
+			if rerr := os.Remove(rawMeta); rerr != nil {
+				Warn.Printf("failed to remove raw meta after mongorestore failure: %v", rerr)
+			}
 		}
 		return fmt.Errorf("mongorestore failed for %s.%s: %v\noutput=%s",
 			db, coll, err, string(out))
@@ -285,8 +323,12 @@ func RestoreCollectionWithMetadata(bsonFile, metaFile, db, coll string, verify b
 	Info.Printf("Restore completed for %s.%s", db, coll)
 
 	if !AppConfig.KeepRawFiles {
-		os.Remove(rawBson)
-		os.Remove(rawMeta)
+		if rerr := os.Remove(rawBson); rerr != nil {
+			Warn.Printf("failed to remove raw bson during cleanup: %v", rerr)
+		}
+		if rerr := os.Remove(rawMeta); rerr != nil {
+			Warn.Printf("failed to remove raw meta during cleanup: %v", rerr)
+		}
 		Info.Printf("Cleaned up raw files for %s.%s", db, coll)
 	}
 	return nil
@@ -340,11 +382,22 @@ func BulkRestore(restoreList []string, dbName, collection string, verify bool) {
 		bsonFile := s2BsonFile
 		metaFile := strings.TrimSuffix(s2BsonFile, ".bson.s2") + ".metadata.json.s2"
 
-		Info.Printf("Restoring file %s into %s.%s (verify=%v)...", bsonFile, dbName, collection, verify)
-		if err := RestoreCollectionWithMetadata(bsonFile, metaFile, dbName, collection, verify); err != nil {
+		// If dbName not provided, infer it from path: expected layout
+		// backupBase/<db>/<collection>/<db>/<collection>.bson.s2
+		targetDB := dbName
+		if targetDB == "" {
+			// go up two directories: dirname(dirname(dirname(s2BsonFile))) -> backupBase/<db>
+			// We want the db name which is filepath.Base(filepath.Dir(filepath.Dir(s2BsonFile)))
+			parent := filepath.Dir(s2BsonFile)
+			parent2 := filepath.Dir(parent)
+			targetDB = filepath.Base(parent2)
+		}
+
+		Info.Printf("Restoring file %s into %s.%s (verify=%v)...", bsonFile, targetDB, collection, verify)
+		if err := RestoreCollectionWithMetadata(bsonFile, metaFile, targetDB, collection, verify); err != nil {
 			Error.Printf("Bulk restore failed for %s: %v", bsonFile, err)
 		} else {
-			Info.Printf("Bulk restore success for %s -> %s.%s", bsonFile, dbName, collection)
+			Info.Printf("Bulk restore success for %s -> %s.%s", bsonFile, targetDB, collection)
 		}
 	}
 

@@ -36,7 +36,12 @@ func InitLogger(logPath string) error {
 	mwOut := io.MultiWriter(os.Stdout, f)
 	mwErr := io.MultiWriter(os.Stderr, f)
 
-	Info = log.New(mwOut, "[INFO] ", log.LstdFlags)
+	// If verbose is disabled, route Info to ioutil.Discard to keep logs minimal
+	var infoOut io.Writer = mwOut
+	if !AppConfig.Verbose {
+		infoOut = io.Discard
+	}
+	Info = log.New(infoOut, "[INFO] ", log.LstdFlags)
 	Warn = log.New(mwOut, "[WARN] ", log.LstdFlags)
 	Error = log.New(mwErr, "[ERROR] ", log.LstdFlags)
 
@@ -71,7 +76,11 @@ func rotateLogFile(basePath string) {
 	logFile = f
 	mwOut := io.MultiWriter(os.Stdout, f)
 	mwErr := io.MultiWriter(os.Stderr, f)
-	Info.SetOutput(mwOut)
+	if AppConfig.Verbose {
+		Info.SetOutput(mwOut)
+	} else {
+		Info.SetOutput(io.Discard)
+	}
 	Warn.SetOutput(mwOut)
 	Error.SetOutput(mwErr)
 	Info.Printf("Log rotated: %s -> %s", basePath, newName)
@@ -80,5 +89,18 @@ func rotateLogFile(basePath string) {
 func CloseLogger() {
 	if logFile != nil {
 		logFile.Close()
+	}
+}
+
+// SetVerbose toggles Info logging at runtime
+func SetVerbose(v bool) {
+	AppConfig.Verbose = v
+	if Info == nil {
+		return
+	}
+	if v {
+		Info.SetOutput(io.MultiWriter(os.Stdout, logFile))
+	} else {
+		Info.SetOutput(io.Discard)
 	}
 }

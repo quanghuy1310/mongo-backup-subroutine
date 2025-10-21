@@ -26,6 +26,11 @@ type Config struct {
 	ScheduleHour     int
 	ScheduleMin      int
 	RetentionDays    int
+	// BackupDaysInterval controls how many recent daily GPS collections to back up.
+	// Allowed values: 1..3. Default: 1.
+	BackupDaysInterval int
+	// Verbose controls informational logging. When false, Info logs are suppressed.
+	Verbose bool
 }
 
 var AppConfig Config
@@ -77,21 +82,34 @@ func LoadConfig() {
 	}
 
 	AppConfig = Config{
-		MongoURI:         os.Getenv("MONGO_URI"),
-		BackupPath:       os.Getenv("BACKUP_PATH"),
-		MongodumpPath:    os.Getenv("MONGODUMP_PATH"),
-		MongorestorePath: os.Getenv("MONGORESTORE_PATH"),
-		Compression:      os.Getenv("COMPRESSION"),
-		RetryInterval:    retryInterval,
-		MaxRetries:       atoiDefault(os.Getenv("MAX_RETRIES"), 5),
-		MaxRetryDays:     atoiDefault(os.Getenv("MAX_RETRY_DAYS"), 7),
-		BackupTimeout:    backupTimeout,
-		KeepRawFiles:     keepRawFiles,
-		WorkerCount:      workerCount,
-		LogFile:          os.Getenv("LOG_FILE"),
-		ScheduleHour:     hour,
-		ScheduleMin:      minute,
-		RetentionDays:    atoiDefault(os.Getenv("RETENTION_DAYS"), 30),
+		MongoURI:           os.Getenv("MONGO_URI"),
+		BackupPath:         os.Getenv("BACKUP_PATH"),
+		MongodumpPath:      os.Getenv("MONGODUMP_PATH"),
+		MongorestorePath:   os.Getenv("MONGORESTORE_PATH"),
+		Compression:        os.Getenv("COMPRESSION"),
+		RetryInterval:      retryInterval,
+		MaxRetries:         atoiDefault(os.Getenv("MAX_RETRIES"), 5),
+		MaxRetryDays:       atoiDefault(os.Getenv("MAX_RETRY_DAYS"), 7),
+		BackupTimeout:      backupTimeout,
+		KeepRawFiles:       keepRawFiles,
+		WorkerCount:        workerCount,
+		LogFile:            os.Getenv("LOG_FILE"),
+		ScheduleHour:       hour,
+		ScheduleMin:        minute,
+		RetentionDays:      atoiDefault(os.Getenv("RETENTION_DAYS"), 30),
+		BackupDaysInterval: atoiDefault(os.Getenv("BACKUP_DAYS_INTERVAL"), 1),
+		Verbose: func() bool {
+			v := os.Getenv("VERBOSE")
+			return v == "1" || v == "true" || v == "TRUE"
+		}(),
+	}
+
+	// Clamp BackupDaysInterval to 1..3 because Mongo keeps 3 days of GPS data
+	if AppConfig.BackupDaysInterval < 1 {
+		AppConfig.BackupDaysInterval = 1
+	}
+	if AppConfig.BackupDaysInterval > 3 {
+		AppConfig.BackupDaysInterval = 3
 	}
 
 	missing := []string{}

@@ -191,3 +191,23 @@ func ListProviderDatabases() ([]string, error) {
 	Info.Printf("Found %d provider databases for backup", len(filtered))
 	return filtered, nil
 }
+
+// CollectionExists checks whether a collection exists in a database
+func CollectionExists(dbName, collName string) bool {
+	if mongoClient == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	names, err := mongoClient.Database(dbName).ListCollectionNames(ctx, bson.M{"name": collName})
+	if err != nil {
+		Error.Printf("Failed to list collections for %s: %v", dbName, err)
+		return false
+	}
+	for _, n := range names {
+		if n == collName {
+			return true
+		}
+	}
+	return false
+}
